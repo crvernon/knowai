@@ -15,7 +15,7 @@ from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS # Using community import
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
-from langchain_core.pydantic_v1 import BaseModel, Field # For function calling output schema
+from pydantic import BaseModel, Field # For function calling output schema
 # Import MultiQueryRetriever
 from langchain.retrievers.multi_query import MultiQueryRetriever
 from dotenv import load_dotenv
