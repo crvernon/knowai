@@ -1,0 +1,11 @@
+streamlit
+langchain>=0.1.0,<0.2.0
+langgraph
+langchain-openai
+langchain-community
+faiss-cpu # Or faiss-gpu if you have CUDA setup
+pymupdf # For fitz PDF parsing
+python-dotenv
+openai>=1.0.0
+pygraphviz
+Pillow
