@@ -479,7 +479,7 @@ def grade_documents(state: GraphState) -> GraphState:
         return {"documents": []}
 
 
-# Node 4: Generate Answer for each file (MODIFIED NODE)
+# Node 4: Generate Answer for each file (PROMPT MODIFIED)
 def generate_individual_answers(state: GraphState) -> GraphState:
     """
     Generates an answer FOR EACH FILE based on its relevant documents.
@@ -512,14 +512,14 @@ def generate_individual_answers(state: GraphState) -> GraphState:
     st.write(f"Found relevant documents in {len(docs_by_file)} out of {len(files_to_process)} selected file(s).")
 
     # Define the prompt template for generating answer from a single file's context
-    # (This is the same detailed prompt as before, focused on contextualized quotes)
+    # *** MODIFIED INSTRUCTION #4 FOR CITATION FORMAT ***
     prompt_template_single_file = """You are an expert assistant analyzing a technical report. Your task is to answer the user's question comprehensively based *only* on the provided context chunks from a SINGLE FILE, which have been filtered for relevance.
 
     Follow these instructions carefully:
     1.  Thoroughly read all provided context chunks from this file, each marked with '--- Context from Page X ---'. Pay attention to the page numbers. Synthesize information found across multiple chunks *within this file* if they relate to the same aspect of the question.
     2.  Answer the user's question directly based *only* on the information present in the context from this file.
     3.  Identify the most relevant information or statement(s) within the context that directly address the question.
-    4.  **Contextualized Quoting:** When presenting this key information, include a direct quote (enclosed in double quotation marks) of the most relevant sentence or phrase. **Crucially, also explain the surrounding context from the *same chunk* to clarify the quote's meaning or provide necessary background.** For example, instead of just `"quote..." (filename.pdf, Page X)`, you might say: `The report discusses mitigation strategies, stating, "quote..." (filename.pdf, Page X), which is part of a larger section detailing preventative measures.` Cite the file name (which will be the same for all context here) and page number in parentheses after the quote, e.g., ({filename}, Page 31).
+    4.  **Contextualized Quoting:** When presenting this key information, include a direct quote (enclosed in **double quotation marks**) of the most relevant sentence or phrase. **Crucially, also explain the surrounding context from the *same chunk* to clarify the quote's meaning or provide necessary background.** For example, instead of just citing, you might say: `The report discusses mitigation strategies, stating, "direct quote text..." (filename.pdf, Page X), which is part of a larger section detailing preventative measures.` Cite the **file name and page number in parentheses** after the quote, like this: `("direct quote text...", {filename}, Page X)`.
     5.  If the question asks about specific details (like financial allocations, frequencies, specific procedures) and that detail is *not* found in this file's context, explicitly state that the information is not provided *in this specific file*. Do not make assumptions or provide external knowledge.
     6.  **Structure for Clarity:** Structure your answer logically for this file. Start with a direct summary answer if possible based on this file. Then, present the supporting details using the contextualized quoting method described above. Ensure the explanation connects the quote and its context clearly back to the user's original question. Conclude by addressing any parts of the question that couldn't be answered from this file's context. If no relevant information is found in the provided context *from this file* to answer the question, state that clearly.
 
@@ -528,7 +528,7 @@ def generate_individual_answers(state: GraphState) -> GraphState:
 
     Question: {question}
 
-    Detailed Answer based ONLY on File '{filename}' (with Contextualized Quotes and Citations):"""
+    Detailed Answer based ONLY on File '{filename}' (with Contextualized Quotes and Citations in the format ("quote...", filename.pdf, Page X)):"""
     prompt_single_file = PromptTemplate(template=prompt_template_single_file, input_variables=["context", "question", "filename"])
 
     # Instantiate LLM for generation
@@ -572,7 +572,7 @@ def generate_individual_answers(state: GraphState) -> GraphState:
     return {"individual_answers": individual_answers}
 
 
-# Node 5: Combine individual answers (NEW NODE)
+# Node 5: Combine individual answers (Unchanged)
 def combine_answers(state: GraphState) -> GraphState:
     """
     Combines the individual answers generated for each file into a single, comprehensive answer.
@@ -602,8 +602,8 @@ def combine_answers(state: GraphState) -> GraphState:
 
     Follow these instructions VERY carefully:
     1.  **Goal:** Synthesize the information from all provided file-specific answers into ONE cohesive response to the original user question.
-    2.  **Preserve ALL Details:** Do NOT summarize or omit any specific facts, figures, quotes, or findings mentioned in the individual answers. Ensure the final answer is as detailed as the sum of the individual answers.
-    3.  **Attribute Clearly:** Explicitly mention the source file(s) for each piece of information or finding. Use parenthetical citations like `(Source: filename.pdf)` or integrate attribution naturally, e.g., `File 'report_A.pdf' states that... while 'report_B.pdf' adds...`.
+    2.  **Preserve ALL Details:** Do NOT summarize or omit any specific facts, figures, quotes, or findings mentioned in the individual answers. Ensure the final answer is as detailed as the sum of the individual answers. Pay attention to the specific citation format used in the individual answers (e.g., ("quote...", filename.pdf, Page X)).
+    3.  **Attribute Clearly:** Explicitly mention the source file(s) for each piece of information or finding. Use parenthetical citations like `(Source: filename.pdf)` or integrate attribution naturally, e.g., `File 'report_A.pdf' states that... while 'report_B.pdf' adds...`. When incorporating direct quotes from the individual answers, retain their original citation format.
     4.  **Structure Logically:** Organize the combined answer logically based on the user's question. If the question has multiple parts, address each part, synthesizing information from relevant files for that part. Use headings or bullet points if it improves clarity.
     5.  **Handle Contradictions/Nuances:** If different files provide conflicting or slightly different information, present both findings and attribute them clearly (e.g., `File A reports X, whereas File B reports Y.`). Do not try to resolve conflicts unless the context explicitly allows it.
     6.  **Acknowledge Missing Info:** If an individual answer explicitly stated that information was *not* found in a specific file, reflect that in the combined answer where appropriate (e.g., `While File A provided details on X, File B did not contain information on this topic.`).
@@ -612,10 +612,10 @@ def combine_answers(state: GraphState) -> GraphState:
     User's Original Question:
     {question}
 
-    Individual Answers Generated from Different Files:
+    Individual Answers Generated from Different Files (Note the citation format used within):
     {formatted_answers}
 
-    Synthesized Comprehensive Answer (Preserving all details and attributing sources):"""
+    Synthesized Comprehensive Answer (Preserving all details and attributing sources, retaining original quote citations):"""
     prompt_combine = PromptTemplate(template=prompt_template_combine, input_variables=["question", "formatted_answers"])
 
     try:
@@ -651,7 +651,7 @@ def combine_answers(state: GraphState) -> GraphState:
         return {"generation": combined.strip()}
 
 
-# --- LangGraph Conditional Edge ---
+# --- LangGraph Conditional Edge (Unchanged) ---
 def decide_to_generate(state: GraphState) -> str:
     """
     Determines whether to proceed to generating individual answers based on document relevance.
@@ -669,7 +669,7 @@ def decide_to_generate(state: GraphState) -> str:
         # Route to the node that generates answers per file
         return "generate_individual"
 
-# --- Build LangGraph (MODIFIED STRUCTURE) ---
+# --- Build LangGraph (Unchanged Structure) ---
 
 # Define the workflow graph
 workflow = StateGraph(GraphState)
@@ -678,7 +678,7 @@ workflow = StateGraph(GraphState)
 workflow.add_node("retrieve", retrieve_docs_multi_query)
 workflow.add_node("filter_documents", filter_documents)
 workflow.add_node("grade_documents", grade_documents)
-workflow.add_node("generate_individual", generate_individual_answers) # Renamed node
+workflow.add_node("generate_individual", generate_individual_answers) # Node with updated prompt
 workflow.add_node("combine_answers", combine_answers) # New node
 
 # Build graph edges
@@ -716,7 +716,7 @@ elif not base_retriever:
      st.sidebar.error("LangGraph compilation skipped because the base vector store could not be loaded.")
 
 
-# --- Streamlit UI ---
+# --- Streamlit UI (Unchanged) ---
 
 # --- Inline SVG Logo with Title ---
 svg_path = "./img/projectLogo.svg"
