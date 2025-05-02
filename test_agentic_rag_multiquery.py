@@ -519,7 +519,7 @@ def generate_individual_answers(state: GraphState) -> GraphState:
     1.  Thoroughly read all provided context chunks from this file, each marked with '--- Context from Page X ---'. Pay attention to the page numbers. Synthesize information found across multiple chunks *within this file* if they relate to the same aspect of the question.
     2.  Answer the user's question directly based *only* on the information present in the context from this file.
     3.  Identify the most relevant information or statement(s) within the context that directly address the question.
-    4.  **Contextualized Quoting:** When presenting this key information, include a direct quote (enclosed in **double quotation marks**) of the most relevant sentence or phrase. **Crucially, also explain the surrounding context from the *same chunk* to clarify the quote's meaning or provide necessary background.** For example, instead of just citing, you might say: `The report discusses mitigation strategies, stating, "direct quote text..." (filename.pdf, Page X), which is part of a larger section detailing preventative measures.` Cite the **file name and page number in parentheses** after the quote, like this: `("direct quote text...", {filename}, Page X)`.
+    4.  **Contextualized Quoting:** When presenting this key information, include a direct quote (enclosed in **double quotation marks**) of the most relevant sentence or phrase. **Crucially, also explain the surrounding context from the *same chunk* to clarify the quote's meaning or provide necessary background.** For example, instead of just citing, you might say: `The report discusses mitigation strategies, stating, "direct quote text..." ({filename}, Page X), which is part of a larger section detailing preventative measures.` Cite the **file name and page number in parentheses** immediately after the closing quotation mark, like this: `"direct quote text..." ({filename}, Page X)`.
     5.  If the question asks about specific details (like financial allocations, frequencies, specific procedures) and that detail is *not* found in this file's context, explicitly state that the information is not provided *in this specific file*. Do not make assumptions or provide external knowledge.
     6.  **Structure for Clarity:** Structure your answer logically for this file. Start with a direct summary answer if possible based on this file. Then, present the supporting details using the contextualized quoting method described above. Ensure the explanation connects the quote and its context clearly back to the user's original question. Conclude by addressing any parts of the question that couldn't be answered from this file's context. If no relevant information is found in the provided context *from this file* to answer the question, state that clearly.
 
@@ -528,7 +528,7 @@ def generate_individual_answers(state: GraphState) -> GraphState:
 
     Question: {question}
 
-    Detailed Answer based ONLY on File '{filename}' (with Contextualized Quotes and Citations in the format ("quote...", filename.pdf, Page X)):"""
+    Detailed Answer based ONLY on File '{filename}' (with Contextualized Quotes and Citations in the format "quote..." (filename.pdf, Page X)):"""
     prompt_single_file = PromptTemplate(template=prompt_template_single_file, input_variables=["context", "question", "filename"])
 
     # Instantiate LLM for generation
@@ -602,7 +602,7 @@ def combine_answers(state: GraphState) -> GraphState:
 
     Follow these instructions VERY carefully:
     1.  **Goal:** Synthesize the information from all provided file-specific answers into ONE cohesive response to the original user question.
-    2.  **Preserve ALL Details:** Do NOT summarize or omit any specific facts, figures, quotes, or findings mentioned in the individual answers. Ensure the final answer is as detailed as the sum of the individual answers. Pay attention to the specific citation format used in the individual answers (e.g., ("quote...", filename.pdf, Page X)).
+    2.  **Preserve ALL Details:** Do NOT summarize or omit any specific facts, figures, quotes, or findings mentioned in the individual answers. Ensure the final answer is as detailed as the sum of the individual answers. Pay attention to the specific citation format used in the individual answers (e.g., "quote..." (filename.pdf, Page X)).
     3.  **Attribute Clearly:** Explicitly mention the source file(s) for each piece of information or finding. Use parenthetical citations like `(Source: filename.pdf)` or integrate attribution naturally, e.g., `File 'report_A.pdf' states that... while 'report_B.pdf' adds...`. When incorporating direct quotes from the individual answers, retain their original citation format.
     4.  **Structure Logically:** Organize the combined answer logically based on the user's question. If the question has multiple parts, address each part, synthesizing information from relevant files for that part. Use headings or bullet points if it improves clarity.
     5.  **Handle Contradictions/Nuances:** If different files provide conflicting or slightly different information, present both findings and attribute them clearly (e.g., `File A reports X, whereas File B reports Y.`). Do not try to resolve conflicts unless the context explicitly allows it.
