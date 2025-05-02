@@ -1,16 +1,27 @@
-import streamlit as st # Using streamlit temporarily for status updates if run via streamlit run
 import fitz  # PyMuPDF
 import os
 import argparse # For command-line arguments
 import json
 from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional
+from neo4j import GraphDatabase
+import re
+import concurrent.futures
+import threading
+_file_write_lock = threading.Lock()
+
+from tqdm import tqdm
+from pydantic import BaseModel, Field, ValidationError
 
 # LangChain components
+
+# Configure LangChain verbosity to avoid deprecated verbose import warning
+from langchain.globals import set_verbose
+set_verbose(False)
+
 from langchain_openai import AzureChatOpenAI
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.pydantic_v1 import BaseModel, Field, ValidationError
 from langchain_core.output_parsers import StrOutputParser # Using string output parser now
 
 # --- Azure OpenAI Configuration ---
@@ -21,9 +32,15 @@ azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", default=None)
 deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
 openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01")
 
+
 # --- Constants ---
 CHUNK_SIZE = 1500 # Process slightly larger chunks for KG extraction
 CHUNK_OVERLAP = 200
+
+# --- Neo4j Configuration ---
+NEO4J_URI = "neo4j://localhost:7687"
+NEO4J_AUTH = ("neo4j", "postgres")
+NEO4J_DATABASE = "neo4j"
 
 # --- Pydantic Schemas for LLM Output Validation ---
 
@@ -74,7 +91,10 @@ def generate_cypher(triples: List[Dict[str, Any]], node_label: str = "Chunk") ->
         # Basic cleaning/escaping could be added here if needed
         head_entity = triple.get("head", "").strip()
         tail_entity = triple.get("tail", "").strip()
-        relation_type = triple.get("type", "").strip().replace(" ", "_").upper() # Format relationship type
+        raw_type = triple.get("type", "").strip()
+        # Replace non-alphanumeric characters with underscore, collapse multiple underscores, and remove leading/trailing underscores
+        relation_type = re.sub(r'[^0-9A-Za-z]', '_', raw_type)
+        relation_type = re.sub(r'_+', '_', relation_type).strip('_').upper()
 
         if not head_entity or not tail_entity or not relation_type:
             print(f"Skipping invalid triple: {triple}")
@@ -97,7 +117,7 @@ def generate_cypher(triples: List[Dict[str, Any]], node_label: str = "Chunk") ->
 
 # --- Main Processing Function ---
 
-def build_knowledge_graph(pdf_path: str, output_cypher_file: str):
+def build_knowledge_graph(pdf_path: str, output_cypher_file: str, write_output: bool = False):
     """
     Extracts knowledge triples from a PDF and saves them as Cypher statements.
 
@@ -110,6 +130,9 @@ def build_knowledge_graph(pdf_path: str, output_cypher_file: str):
         return
 
     print(f"Starting knowledge graph extraction for: {pdf_path}")
+    # Initialize document tracking
+    doc_filename = os.path.basename(pdf_path)
+    entities = set()
 
     # 1. Extract Text
     pdf_text = extract_text_from_pdf(pdf_path)
@@ -124,6 +147,8 @@ def build_knowledge_graph(pdf_path: str, output_cypher_file: str):
     )
     chunks = text_splitter.split_text(pdf_text)
     print(f"Split text into {len(chunks)} chunks.")
+    # Initialize per-file chunk progress bar
+    pbar = tqdm(total=len(chunks), desc=f"Processing {doc_filename}", unit="chunk")
     if not chunks:
         print("Error: No text chunks generated.")
         return
@@ -180,23 +205,8 @@ def build_knowledge_graph(pdf_path: str, output_cypher_file: str):
     all_cypher_statements = []
     total_triples = 0
 
-    # Use st.progress if running via streamlit, otherwise just print
-    progress_bar = None
-    try:
-        # Check if running within Streamlit before attempting to use st.progress
-        get_ipython # Simple check if running in IPython/Jupyter like env
-        # If not in streamlit, don't use progress bar
-    except NameError:
-        try:
-            # Attempt to use st.progress, will fail if not in streamlit context
-             progress_bar = st.progress(0.0)
-        except Exception:
-            progress_bar = None # Not running in streamlit
-
     for i, chunk in enumerate(chunks):
         print(f"\nProcessing chunk {i + 1}/{len(chunks)}...")
-        if progress_bar:
-            progress_bar.progress(float(i+1)/len(chunks), text=f"Processing chunk {i + 1}/{len(chunks)}")
 
         try:
             # Create chain and invoke (LLM output is now a string)
@@ -216,14 +226,17 @@ def build_knowledge_graph(pdf_path: str, output_cypher_file: str):
                 parsed_json = json.loads(llm_output_str)
 
                 # Validate parsed JSON against Pydantic model
-                validated_data = TripleList.parse_obj(parsed_json)
+                validated_data = TripleList.model_validate(parsed_json)
 
                 if validated_data and validated_data.triples:
-                    chunk_triples = [t.dict() for t in validated_data.triples] # Convert Pydantic models to dicts
+                    # Convert Pydantic models to dicts using model_dump
+                    chunk_triples = [t.model_dump() for t in validated_data.triples]
                     print(f"  Successfully parsed and validated {len(chunk_triples)} triples.")
                     total_triples += len(chunk_triples)
                     cypher_statements = generate_cypher(chunk_triples)
                     all_cypher_statements.extend(cypher_statements)
+                    # Track entities for FROM_DOCUMENT relationships
+                    entities.update([t['head'] for t in chunk_triples] + [t['tail'] for t in chunk_triples])
                 else:
                     print("  No triples extracted or validated from this chunk.")
 
@@ -243,29 +256,148 @@ def build_knowledge_graph(pdf_path: str, output_cypher_file: str):
             # Optionally add retry logic here
             continue # Move to the next chunk
 
-    if progress_bar:
-        progress_bar.progress(1.0, text="Processing complete.")
+        # Update per-file progress
+        pbar.update(1)
 
+    pbar.close()
     print(f"\nExtraction complete. Total triples extracted: {total_triples}")
 
-    # 6. Save Cypher Statements
+    # Add document node and link to each extracted entity
+    all_cypher_statements.insert(0, f'MERGE (d:Document {{name: "{doc_filename}"}});')
+    for entity in entities:
+        safe_entity = entity.replace('"', '\\"')
+        all_cypher_statements.append(
+            f'MATCH (d:Document {{name: "{doc_filename}"}}), (n:Chunk {{name: "{safe_entity}"}}) '
+            'MERGE (d)-[:FROM_DOCUMENT]->(n);'
+        )
+
+    # Optionally write Cypher statements to file
+    if write_output and all_cypher_statements:
+        try:
+            with _file_write_lock:
+                with open(output_cypher_file, 'a', encoding='utf-8') as f:
+                    for stmt in all_cypher_statements:
+                        f.write(stmt + "\n")
+            print(f"Successfully wrote {len(all_cypher_statements)} Cypher statements to file {output_cypher_file}")
+        except Exception as e:
+            print(f"Error writing Cypher statements to file {output_cypher_file}: {e}")
+
+    # 6. Execute Cypher Statements in Neo4j
     if all_cypher_statements:
         try:
-            with open(output_cypher_file, 'w', encoding='utf-8') as f:
+            driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
+            with driver.session(database=NEO4J_DATABASE) as session:
                 for stmt in all_cypher_statements:
-                    f.write(stmt + "\n")
-            print(f"Successfully saved {len(all_cypher_statements)} Cypher statements to {output_cypher_file}")
+                    session.run(stmt)
+            print(f"Successfully executed {len(all_cypher_statements)} Cypher statements in database {NEO4J_DATABASE}")
         except Exception as e:
-            print(f"Error writing Cypher file {output_cypher_file}: {e}")
+            print(f"Error executing Cypher statements in Neo4j: {e}")
+        finally:
+            driver.close()
     else:
         print("No Cypher statements generated as no triples were extracted.")
 
-# --- Command-Line Interface ---
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Build a Knowledge Graph from a PDF by extracting triples and generating Cypher statements.")
-    parser.add_argument("pdf_path", help="Path to the input PDF file.")
-    parser.add_argument("-o", "--output", default="knowledge_graph.cypher", help="Path to save the output Cypher file (default: knowledge_graph.cypher).")
+
+# --- Command-Line Interface Functions ---
+
+def expand_pdf_paths(paths: List[str]) -> List[str]:
+    """
+    Expand a list of files or directories into a flat list of PDF file paths.
+    """
+    pdf_list: List[str] = []
+    for path in paths:
+        if os.path.isdir(path):
+            for f in os.listdir(path):
+                if f.lower().endswith(".pdf"):
+                    pdf_list.append(os.path.join(path, f))
+        elif os.path.isfile(path) and path.lower().endswith(".pdf"):
+            pdf_list.append(path)
+        else:
+            print(f"Warning: {path} is not a valid PDF file or directory and will be skipped.")
+    return pdf_list
+
+def filter_existing_documents(pdf_list: List[str]) -> List[str]:
+    """
+    Return only those PDFs that do not yet have a Document node in Neo4j.
+    """
+    to_process: List[str] = []
+    driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
+    with driver.session(database=NEO4J_DATABASE) as session:
+        for pdf in pdf_list:
+            name = os.path.basename(pdf)
+            record = session.run(
+                "MATCH (d:Document {name: $name}) RETURN d",
+                {"name": name}
+            ).single()
+            if record:
+                print(f"Skipping {name}: already exists in graph.")
+            else:
+                to_process.append(pdf)
+    driver.close()
+    return to_process
+
+def clear_output_file(output_file: str, write_file: bool) -> None:
+    """
+    Clear the output file if write_file is True.
+    """
+    if write_file and os.path.exists(output_file):
+        os.remove(output_file)
+
+def process_pdfs_parallel(pdf_list: List[str], output_file: str, write_file: bool) -> None:
+    """
+    Process a list of PDFs concurrently.
+    """
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future_to_pdf = {
+            executor.submit(build_knowledge_graph, pdf, output_file, write_file): pdf
+            for pdf in pdf_list
+        }
+        for future in concurrent.futures.as_completed(future_to_pdf):
+            pdf_file = future_to_pdf[future]
+            try:
+                future.result()
+            except Exception as e:
+                print(f"Error processing {pdf_file}: {e}")
+
+def main() -> None:
+    """
+    Parse command-line arguments and orchestrate the PDF processing workflow.
+    """
+    parser = argparse.ArgumentParser(
+        description="Build a Knowledge Graph from PDFs by extracting triples and generating Cypher statements."
+    )
+    parser.add_argument(
+        "pdf_directory",
+        nargs="+",
+        help="Paths to the input PDF file(s) or directories."
+    )
+    parser.add_argument(
+        "-o", "--output",
+        default="knowledge_graph.cypher",
+        help="Path to save the output Cypher file (default: knowledge_graph.cypher)."
+    )
+    parser.add_argument(
+        "--write-file",
+        action="store_true",
+        help="Additionally write Cypher statements to the output file."
+    )
 
     args = parser.parse_args()
+    write_file = args.write_file
 
-    build_knowledge_graph(args.pdf_path, args.output)
+    # Prepare output file if needed
+    clear_output_file(args.output, write_file)
+
+    # Expand and filter PDFs
+    pdf_list = expand_pdf_paths(args.pdf_directory)
+    to_process = filter_existing_documents(pdf_list)
+
+    if not to_process:
+        print("No new PDFs to process.")
+        return
+
+    # Process new PDFs concurrently
+    process_pdfs_parallel(to_process, args.output, write_file)
+
+if __name__ == "__main__":
+    main()
