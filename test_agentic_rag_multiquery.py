@@ -55,7 +55,7 @@ openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01") # Defau
 # --- Logo Display ---
 # Place logos at the top-left using columns
 # Ensure the 'img' folder is in the same directory as your script
-logo_col1, logo_col2, title_col = st.columns([1.5, 1.5, 4]) # Adjust ratios as needed
+logo_col1, logo_col2, title_col = st.columns([1, 1, 4]) # Adjust ratios as needed
 logo_path1 = "./img/pnnl-logo.png"
 logo_path2 = "./img/gdo-logo.png"
 logo_path3 = "./img/projectLogo.svg"
@@ -132,8 +132,10 @@ PREDEFINED_QUESTIONS = [
 ]
 
 # --- File Selector UI ---
-st.sidebar.subheader("Select Source File")
-selected_file = st.sidebar.selectbox("File", ["All"] + files)
+st.sidebar.subheader("Select Source File(s)")
+
+file_options = ["All"] + files
+selected_files = st.sidebar.multiselect("Files", file_options, default=["All"])
 
 # --- Helper Functions (PDF Processing - Unchanged) ---
 def extract_pages_from_pdf(pdf_file):
@@ -191,7 +193,7 @@ def get_base_retriever_from_pdf(file_hash): # Parameter name matches the variabl
         st.write(f"Split PDF into {len(all_docs)} chunks across {len(pages_data)} pages.")
 
         # --- Instantiate Azure Embeddings ---
-        st.write(f"Using Azure embeddings deployment: {embeddings_deployment}")
+        st.write(f"Translating the user query into embeddings...")
         embeddings = AzureOpenAIEmbeddings(
             azure_deployment=embeddings_deployment,
             azure_endpoint=azure_endpoint,
@@ -200,10 +202,12 @@ def get_base_retriever_from_pdf(file_hash): # Parameter name matches the variabl
         )
 
         st.write("Building FAISS index with Azure embeddings...")
+
         vectorstore = FAISS.from_documents(documents=all_docs, embedding=embeddings)
         st.write("FAISS index built successfully.")
+
         # Return the base retriever, k value applied by MultiQueryRetriever later
-        return vectorstore.as_retriever(search_kwargs={'k': 10}) # Base retriever fetches fewer docs per query
+        return vectorstore.as_retriever(search_kwargs={'k': 50}) # Base retriever fetches fewer docs per query
     except Exception as e:
         st.error(f"Error processing PDF and building vector store: {e}", icon="❌")
         st.exception(e)
@@ -263,7 +267,7 @@ def retrieve_docs_multi_query(state: GraphState) -> GraphState:
 
     try:
         # --- Instantiate Azure LLM for Query Generation ---
-        st.write(f"Using Azure chat deployment for query generation: {deployment}")
+        st.write(f"Querying reports...")
         llm_for_queries = AzureChatOpenAI(
             temperature=0, # Low temp for query generation
             api_key=api_key,
@@ -277,7 +281,8 @@ def retrieve_docs_multi_query(state: GraphState) -> GraphState:
         # and the base_retriever to fetch documents for each version.
         # The number of queries generated defaults to 3, can be adjusted.
         multi_query_retriever = MultiQueryRetriever.from_llm(
-            retriever=base_retriever, llm=llm_for_queries
+            retriever=base_retriever, 
+            llm=llm_for_queries
         )
 
         # --- Invoke the MultiQueryRetriever ---
@@ -286,13 +291,16 @@ def retrieve_docs_multi_query(state: GraphState) -> GraphState:
         # Adjust base retriever's k or number of generated queries if more docs are needed.
         unique_docs = multi_query_retriever.get_relevant_documents(query=question)
 
-        # Filter by selected file metadata if specified
-        global selected_file
-        if selected_file and selected_file != "All":
-            unique_docs = [doc for doc in unique_docs if doc.metadata.get("file") == selected_file]
-            st.write(f"Filtered to {len(unique_docs)} chunks from {selected_file}")
+        # Filter by selected files if not selecting "All"
+        if selected_files:
+            unique_docs = [
+                doc for doc in unique_docs
+                if doc.metadata.get("file") in selected_files
+            ]
+            st.write(f"Filtered to {len(unique_docs)} chunks from {selected_files}")
 
         st.write(f"Retrieved {len(unique_docs)} unique documents via Multi-Query.")
+
         # Store these initial documents separately
         return {"original_documents": unique_docs, "question": question}
     except Exception as e:
@@ -328,7 +336,7 @@ def filter_documents(state: GraphState) -> GraphState:
          return {"documents": original_documents}
 
     try:
-        st.write(f"Using Azure chat deployment for filtering: {deployment}")
+        st.write(f"Filtering data to use for your response...")
         filtering_llm = AzureChatOpenAI(
             temperature=0,
             api_key=api_key,
@@ -402,7 +410,7 @@ def grade_documents(state: GraphState) -> GraphState:
          return {"documents": documents, "question": question} # Assume relevant if cannot grade
 
     try:
-        st.write(f"Using Azure chat deployment for grading: {deployment}")
+        st.write(f"Determining queried data relevance...")
         llm = AzureChatOpenAI(
             temperature=0,
             api_key=api_key,
@@ -501,7 +509,7 @@ def generate_answer(state: GraphState) -> GraphState:
         Detailed Answer with Contextualized Quotes and Citations:"""
         prompt = PromptTemplate(template=prompt_template, input_variables=["context", "question"])
 
-        st.write(f"Using Azure chat deployment for generation: {deployment}")
+        st.write(f"Generating your answer...")
         llm = AzureChatOpenAI(
             temperature=0.1,
             api_key=api_key,
@@ -596,7 +604,7 @@ st.markdown(
     unsafe_allow_html=True
 )
 st.markdown(
-    "<div style='text-align:center;'><em>Your AI Assistant to find answers to your questions in the set of reports that interest you!</em></div>",
+    "<div style='text-align:center;'><em>Your AI Assistant to find answers in the set of reports that interest you!</em></div>",
     unsafe_allow_html=True
 )
 
@@ -642,16 +650,21 @@ context_placeholder = st.empty()
 
 # Only run if button clicked AND prerequisites met
 if ask_button and base_retriever and final_question and langgraph_app and azure_creds_valid:
-    answer_placeholder.info("Running graph with Azure OpenAI (MultiQuery Retrieval -> Filter -> Grade -> Generate)...", icon="⏳")
+    answer_placeholder.info("Starting processing...", icon="⏳")
     context_placeholder.empty()
+    # Monkey-patch st.write so node logs update this placeholder
+    _original_st_write = st.write
+    st.write = lambda msg, *args, **kwargs: answer_placeholder.info(f"⏳ {msg}")
 
     try:
-        # Define the initial state to pass to the graph
-        # Pass the BASE retriever to the state
-        initial_state = {"question": final_question, "base_retriever": base_retriever}
-
-        # Invoke the LangGraph app
-        final_state = langgraph_app.invoke(initial_state)
+        try:
+            # Define the initial state to pass to the graph
+            # Pass the BASE retriever to the state
+            initial_state = {"question": final_question, "base_retriever": base_retriever}
+            # Invoke the LangGraph app
+            final_state = langgraph_app.invoke(initial_state)
+        finally:
+            st.write = _original_st_write
 
         # Extract the final answer
         answer = final_state.get("generation", None)
@@ -661,7 +674,6 @@ if ask_button and base_retriever and final_question and langgraph_app and azure_
         else:
             answer_placeholder.warning("Could not find relevant information in the document to answer the question after filtering and grading.", icon="⚠️")
 
-
         # Display the context: Show the unique docs retrieved by MultiQuery
         original_docs_retrieved = final_state.get('original_documents', [])
 
@@ -669,12 +681,12 @@ if ask_button and base_retriever and final_question and langgraph_app and azure_
             with context_placeholder.expander(f"Show Initially Retrieved Context ({len(original_docs_retrieved)} unique chunks via MultiQuery)"):
                 for i, doc in enumerate(original_docs_retrieved):
                     page_num = doc.metadata.get('page', 'N/A')
-                    st.markdown(f"**Chunk {i+1} (MultiQuery Retrieval - Page {page_num}):**")
+                    file_name = doc.metadata.get("file", "N/A")
+                    st.markdown(f"**Chunk {i+1} ({file_name} - Page {page_num}):**")
                     st.markdown(f"> {doc.page_content}")
                     st.divider()
         elif final_state.get("generation") is None:
              context_placeholder.info("No documents were retrieved initially by MultiQuery.")
-
 
     except Exception as e:
         answer_placeholder.error(f"Error running LangGraph: {e}", icon="❌")

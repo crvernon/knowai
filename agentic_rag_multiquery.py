@@ -7,8 +7,7 @@ import fitz  # PyMuPDF
 import faiss
 import os
 import hashlib
-import logging # Import logging
-# Updated OpenAI/Azure imports
+import logging
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI, AzureChatOpenAI, AzureOpenAIEmbeddings
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
@@ -16,7 +15,6 @@ from langchain_community.vectorstores import FAISS # Using community import
 from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
 from pydantic import BaseModel, Field # For function calling output schema
-# Import MultiQueryRetriever
 from langchain.retrievers.multi_query import MultiQueryRetriever
 from dotenv import load_dotenv
 from typing import List, TypedDict, Annotated, Sequence
@@ -62,7 +60,6 @@ PREDEFINED_QUESTIONS = [
 ]
 
 # --- Helper Functions (PDF Processing - Unchanged) ---
-
 def extract_pages_from_pdf(pdf_file):
     """Extracts text page by page from an uploaded PDF file, returning a list of (page_number, text)."""
     pages_content = []
@@ -81,7 +78,7 @@ def extract_pages_from_pdf(pdf_file):
         return None
 
 # --- Caching (Retriever Creation - Returns BASE retriever) ---
-# NOTE: We now create the MultiQueryRetriever dynamically inside the graph node
+# NOTE: We create the MultiQueryRetriever dynamically inside the graph node
 @st.cache_resource(show_spinner="Processing PDF and building knowledge base...")
 def get_base_retriever_from_pdf(file_hash): # Parameter name matches the variable passed
     """Processes PDF, creates Azure embeddings, builds FAISS store, returns BASE retriever."""
@@ -136,8 +133,8 @@ def get_base_retriever_from_pdf(file_hash): # Parameter name matches the variabl
         st.exception(e)
         return None
 
-# --- LangGraph State Definition ---
 
+# --- LangGraph State Definition ---
 class GraphState(TypedDict):
     """
     Represents the state of our graph.
@@ -156,7 +153,6 @@ class GraphState(TypedDict):
     base_retriever: object # Store the BASE retriever
 
 # --- LangGraph Nodes (Modified for MultiQuery Retrieval) ---
-
 def retrieve_docs_multi_query(state: GraphState) -> GraphState:
     """
     Uses MultiQueryRetriever to retrieve documents based on variations of the question.
@@ -529,7 +525,6 @@ if azure_creds_valid and uploaded_file is not None:
         st.session_state[f"file_{file_hash}"] = uploaded_file
 
     # Get the BASE retriever (MultiQueryRetriever is created dynamically)
-    # *** FIX: Pass the correct variable name 'file_hash' ***
     base_retriever = get_base_retriever_from_pdf(file_hash)
 
 

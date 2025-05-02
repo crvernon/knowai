@@ -6,12 +6,15 @@ from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional
 from neo4j import GraphDatabase
 import re
+from difflib import get_close_matches
 import concurrent.futures
 import threading
+import sys
 _file_write_lock = threading.Lock()
 
-from tqdm import tqdm
 from pydantic import BaseModel, Field, ValidationError
+
+
 
 # LangChain components
 
@@ -147,8 +150,8 @@ def build_knowledge_graph(pdf_path: str, output_cypher_file: str, write_output: 
     )
     chunks = text_splitter.split_text(pdf_text)
     print(f"Split text into {len(chunks)} chunks.")
-    # Initialize per-file chunk progress bar
-    pbar = tqdm(total=len(chunks), desc=f"Processing {doc_filename}", unit="chunk")
+    total_chunks = len(chunks)
+    bar_length = 20
     if not chunks:
         print("Error: No text chunks generated.")
         return
@@ -206,7 +209,6 @@ def build_knowledge_graph(pdf_path: str, output_cypher_file: str, write_output: 
     total_triples = 0
 
     for i, chunk in enumerate(chunks):
-        print(f"\nProcessing chunk {i + 1}/{len(chunks)}...")
 
         try:
             # Create chain and invoke (LLM output is now a string)
@@ -242,7 +244,39 @@ def build_knowledge_graph(pdf_path: str, output_cypher_file: str, write_output: 
 
             except json.JSONDecodeError as json_err:
                 print(f"  Error: Failed to decode LLM output as JSON. Error: {json_err}")
-                print(f"  LLM Output String: {llm_output_str}")
+                print(f"  Raw LLM output: {llm_output_str}")
+                # Retry with corrective prompt to ensure valid JSON
+                try:
+                    correction_prompt = ChatPromptTemplate.from_template(
+                        "The JSON you returned had formatting errors: {error}. "
+                        "Please reformat the following output as valid JSON:\n"
+                        "```json\n{raw_output}\n```"
+                    )
+                    correction_chain = correction_prompt | llm | StrOutputParser()
+                    corrected_output = correction_chain.invoke({
+                        "error": str(json_err),
+                        "raw_output": llm_output_str
+                    }).strip()
+                    # Extract JSON content again
+                    try:
+                        start = corrected_output.index("{")
+                        end = corrected_output.rindex("}") + 1
+                        corrected_json = corrected_output[start:end]
+                    except ValueError:
+                        corrected_json = corrected_output
+                    parsed_retry = json.loads(corrected_json)
+                    validated_data = TripleList.model_validate(parsed_retry)
+                    chunk_triples = [t.model_dump() for t in validated_data.triples] if validated_data and validated_data.triples else []
+                    print(f"  Successfully parsed {len(chunk_triples)} triples after retry.")
+                    if chunk_triples:
+                        total_triples += len(chunk_triples)
+                        cypher_statements = generate_cypher(chunk_triples)
+                        all_cypher_statements.extend(cypher_statements)
+                        entities.update([t['head'] for t in chunk_triples] + [t['tail'] for t in chunk_triples])
+                    else:
+                        print("  No triples extracted after retry.")
+                except Exception as retry_err:
+                    print(f"  Retry failed: {retry_err}")
             except ValidationError as val_err:
                 print(f"  Error: LLM output JSON does not match expected schema. Error: {val_err}")
                 print(f"  Parsed JSON: {parsed_json}")
@@ -256,10 +290,13 @@ def build_knowledge_graph(pdf_path: str, output_cypher_file: str, write_output: 
             # Optionally add retry logic here
             continue # Move to the next chunk
 
-        # Update per-file progress
-        pbar.update(1)
-
-    pbar.close()
+        # Print inline progress bar
+        completed = i + 1
+        filled = int(bar_length * completed / total_chunks)
+        bar = "█" * filled + "░" * (bar_length - filled)
+        percent = int(100 * completed / total_chunks)
+        print(f"\rProcessing {doc_filename} [{bar}] {percent}% chunk {completed}/{total_chunks}", end="", flush=True)
+    print()
     print(f"\nExtraction complete. Total triples extracted: {total_triples}")
 
     # Add document node and link to each extracted entity
@@ -359,6 +396,122 @@ def process_pdfs_parallel(pdf_list: List[str], output_file: str, write_file: boo
             except Exception as e:
                 print(f"Error processing {pdf_file}: {e}")
 
+
+# --- Relationship Refinement Helpers ---
+
+def get_existing_relationship_types() -> List[str]:
+    """
+    Retrieve the distinct relationship types currently in the Neo4j database.
+    """
+    driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
+    rel_types: List[str] = []
+    with driver.session(database=NEO4J_DATABASE) as session:
+        # Use built-in procedure to list relationship types
+        result = session.run("CALL db.relationshipTypes()")
+        for record in result:
+            rel_types.append(record["relationshipType"])
+    driver.close()
+    return rel_types
+
+def generalize_relation_names(rel_types: List[str]) -> Dict[str, str]:
+    """
+    Map raw relationship types to generalized types using an LLM to cluster similar names.
+    """
+    # Initialize LLM for clustering
+    mapping = {}
+    try:
+        llm = AzureChatOpenAI(
+            temperature=0.0,
+            api_key=api_key,
+            openai_api_version=openai_api_version,
+            azure_deployment=deployment,
+            azure_endpoint=azure_endpoint,
+            max_tokens=512
+        )
+        prompt = ChatPromptTemplate.from_template(
+            "You are a knowledge graph expert. Given the following list of relationship types:\n"
+            "{rel_list}\n"
+            "Group similar relationship names into generalized categories. "
+            "Return a JSON object with a single key \"mapping\" whose value is an object mapping each "
+            "original relationship name to its generalized category name."
+        )
+        chain = prompt | llm | StrOutputParser()
+        rel_list_str = json.dumps(rel_types)
+        output_str = chain.invoke({"rel_list": rel_list_str})
+        # Attempt to extract JSON content between the first "{" and the last "}"
+        try:
+            start = output_str.index("{")
+            end = output_str.rindex("}") + 1
+            json_content = output_str[start:end]
+        except ValueError:
+            json_content = output_str.strip()
+        try:
+            parsed = json.loads(json_content)
+        except json.JSONDecodeError as json_err:
+            print(f"  Error decoding JSON from LLM output: {json_err}")
+            print(f"  Raw LLM output: {output_str}")
+            # Fallback to identity mapping for all
+            mapping = {rel: rel for rel in rel_types}
+        else:
+            mapping = parsed.get("mapping", {})
+            # Validate fallback for missing entries
+            for rel in rel_types:
+                if rel not in mapping:
+                    mapping[rel] = rel
+    except Exception as e:
+        print(f"Error during LLM-based relation generalization: {e}")
+        # Fallback: identity mapping
+        mapping = {rel: rel for rel in rel_types}
+    # Convert generalized labels to active uppercase verbs per user preference
+    active_synonyms = {
+        "CONTAINMENT": "CONTAINS",
+        "CONFIGURATION": "CONFIGURED_USING",
+        "DESCRIPTION": "DESCRIBES",
+        "INITIATION": "INITIATES"
+    }
+    final_mapping: Dict[str, str] = {}
+    for old_rel, new_rel in mapping.items():
+        new_upper = new_rel.upper()
+        final_mapping[old_rel] = active_synonyms.get(new_upper, new_upper)
+    return final_mapping
+
+def refine_relationship_names(mapping: Dict[str, str]) -> None:
+    """
+    Apply the mapping to rename relationships in the database.
+    For each old->new mapping where they differ, recreate relationships and delete originals.
+    """
+    driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
+    with driver.session(database=NEO4J_DATABASE) as session:
+        for old_rel, new_rel in mapping.items():
+            if old_rel == new_rel:
+                continue
+            old_upper = old_rel.upper()
+            new_upper = new_rel.upper()
+            # Create new relationships of new_upper type and delete old ones
+            cypher = (
+                f"MATCH (a)-[r:`{old_upper}`]->(b) "
+                f"CREATE (a)-[:`{new_upper}`]->(b) "
+                "DELETE r"
+            )
+            session.run(cypher)
+    driver.close()
+
+def refine_relationships() -> None:
+    """
+    Orchestrate generalization of relationship types across the database.
+    """
+    rel_types = get_existing_relationship_types()
+    if not rel_types:
+        print("No relationships found to refine.")
+        return
+    mapping = generalize_relation_names(rel_types)
+    if any(old != new for old, new in mapping.items()):
+        print(f"Refining relationships with mapping: {mapping}")
+        refine_relationship_names(mapping)
+        print("Relationship refinement complete.")
+    else:
+        print("All relationship types already generalized.")
+
 def main() -> None:
     """
     Parse command-line arguments and orchestrate the PDF processing workflow.
@@ -398,6 +551,10 @@ def main() -> None:
 
     # Process new PDFs concurrently
     process_pdfs_parallel(to_process, args.output, write_file)
+
+    # After ingesting new PDFs, refine relationship types for generalization
+    print("Starting relationship refinement...")
+    refine_relationships()
 
 if __name__ == "__main__":
     main()
