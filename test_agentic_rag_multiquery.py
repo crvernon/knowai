@@ -301,7 +301,10 @@ def retrieve_docs_multi_query(state: GraphState) -> GraphState:
 
         st.write(f"Retrieving relevant chunks from {len(files_to_process)} file(s)...")
         # Retrieve potentially relevant documents across the entire base store first
-        unique_docs_unfiltered = multi_query_retriever.get_relevant_documents(query=question)
+        # unique_docs_unfiltered = multi_query_retriever.get_relevant_documents(query=question)
+        unique_docs_unfiltered = multi_query_retriever.invoke(input=question)
+
+
         st.write(f"Retrieved {len(unique_docs_unfiltered)} total unique chunks before file filtering.")
 
         # Filter the retrieved documents to include only those from the selected files
