@@ -3,6 +3,8 @@ import fitz  # PyMuPDF
 import logging
 from dotenv import load_dotenv
 from typing import List, Optional
+import argparse
+from tqdm import tqdm
 
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -67,9 +69,9 @@ def get_retriever_from_directory(
         chunk_size=1500, chunk_overlap=300, length_function=len
     )
     new_docs: List[Document] = []
-    for filename in os.listdir(directory_path):
-        if not filename.lower().endswith(".pdf"):
-            continue
+    # iterate over PDF files with progress bar
+    pdf_files = [f for f in os.listdir(directory_path) if f.lower().endswith(".pdf")]
+    for filename in tqdm(pdf_files, desc="Processing PDF files"):
         if filename in existing_files:
             logger.info(f"Skipping {filename}: already in vector store.")
             continue
@@ -150,7 +152,6 @@ def show_vectorstore_schema(vectorstore):
         "dimension": dimension,
         "metadata_fields": sorted(metadata_keys),
     }
-    logger.info(f"Vectorstore schema: {schema}")
     return schema
 
 
@@ -200,18 +201,25 @@ def list_vectorstore_files(vectorstore) -> List[str]:
 
 
 if __name__ == "__main__":
+    # parse command-line arguments
+    parser = argparse.ArgumentParser(description="Build and load a FAISS vector store from PDFs.")
+    parser.add_argument("pdf_directory", help="Path to the directory containing PDF files")
+    parser.add_argument("--vectorstore_path", default="test_faiss_store", help="Path to save/load the FAISS store")
+    args = parser.parse_args()
 
-    pdf_directory = "/Users/d3y010/projects/gdo_wildfire/data/test"
-    vectorstore_path = "test_faiss_store"
+    # configure logging
+    logging.basicConfig(level=logging.INFO)
 
-    # get_retriever_from_directory(
-    #     directory_path=pdf_directory, 
-    #     persist_directory=vectorstore_path, 
-    #     persist=True,
-    # )
+    # build or update the vector store
+    get_retriever_from_directory(
+        directory_path=args.pdf_directory,
+        persist_directory=args.vectorstore_path,
+        persist=True,
+    )
 
-    vs = load_vectorstore(vectorstore_path)
-
-    print(show_vectorstore_schema(vs))
+    # load and inspect the store
+    vs = load_vectorstore(args.vectorstore_path)
+    schema = show_vectorstore_schema(vs)
+    logger.info(f"Vectorstore schema: {schema}")
     files = list_vectorstore_files(vs)
-    print("Stored files:", files)
+    logger.info(f"Stored files: {files}")
