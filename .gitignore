@@ -1,3 +1,6 @@
+# vectorstore
+test_faiss_store/
+
 # pyenv
 .python-version
 
