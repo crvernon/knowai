@@ -70,20 +70,12 @@ load_dotenv() # Load environment variables from .env file
 k_chunks_retriever = 75 # Number of chunks MultiQueryRetriever aims for IN TOTAL
 
 
-# Fetch Azure and PNNL openai credentials from environment variables
+# Fetch Azure credentials from environment variables
 api_key = os.getenv("AZURE_OPENAI_API_KEY", default=None)
 azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT", default=None)
 deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o") # Default model
 embeddings_deployment = os.getenv("AZURE_EMBEDDINGS_DEPLOYMENT", "text-embedding-3-large") # Default embedding model
 openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01") # API version
-
-pnnl_api_key = os.getenv("PNNL_OPENAI_API_KEY", default=None)
-pnnl_deployment= os.getenv("PNNL_OPENAI_DEPLOYMENT", "gpt-4o-project") # Default model
-pnnl_base_url = os.getenv("PNNL_BASE_URL", "https://ai-incubator-api.pnnl.gov") # API version
-pnnl_embeddings_deployment = os.getenv("PNNL_EMBEDDINGS_DEPLOYMENT", "text-embedding-3-small-project") # Default embedding model
-
-# --- service choice azure/pnnl openai ---
-service = os.getenv("EMBEDDING_SERVICE", "azure")  # Set "azure" or "openai"
 
 
 # --- Logo Display ---
@@ -153,10 +145,10 @@ st.markdown(
 
 
 # --- Check for Azure Credentials ---
-creds_valid = True
+azure_creds_valid = True
 if not api_key or not azure_endpoint:
     st.error("Azure OpenAI API key or endpoint not found. Please set AZURE_OPENAI_API_KEY and AZURE_OPENAI_ENDPOINT environment variables.", icon="🚨")
-    creds_valid = False
+    azure_creds_valid = False
     logging.error("Azure credentials (key or endpoint) missing.")
 
 
@@ -167,71 +159,16 @@ vectorstore = None
 files_in_store = []
 embeddings = None # Define embeddings in a broader scope
 
-
-
-if service == "azure":
+if azure_creds_valid and vectorstore_functions_available:
     try:
-        logging.info("Using Azure OpenAI Embeddings...")
+        logging.info("Initializing Azure OpenAI Embeddings...")
         embeddings = AzureOpenAIEmbeddings(
             azure_deployment=embeddings_deployment,
             azure_endpoint=azure_endpoint,
             api_key=api_key,
             openai_api_version=openai_api_version
         )
-    except Exception as e:
-        logging.error(f"Failed to initialize Azure embeddings: {e}")
-        st.error("Azure embeddings setup failed.")
-        creds_valid = False
-
-elif service == "openai":
-    try:
-        openai_api_key = os.getenv("PNNL_OPENAI_API_KEY", None)
-        if not openai_api_key:
-            raise KeyError("PNNL_OPENAI_API_KEY not found in environment.")
-        
-        logging.info("Using PNNL Incubator API Embeddings...")
-        embeddings = OpenAIEmbeddings(
-            base_url=pnnl_base_url,
-            api_key=pnnl_api_key,
-            model=pnnl_embeddings_deployment
-        )
-    except Exception as e:
-        logging.error(f"Failed to initialize PNNL OpenAI embeddings: {e}")
-        st.error("PNNL API embeddings setup failed.")
-        creds_valid = False
-else:
-    raise KeyError(f"Unsupported embedding service: {service}")
-
-# end--- service choiceazure/pnnl openai ---
-
-
-if creds_valid and vectorstore_functions_available:
-    try:
-        if service == "azure":
-            logging.info("Initializing Azure OpenAI Embeddings...")
-            embeddings = AzureOpenAIEmbeddings(
-                azure_deployment=embeddings_deployment,
-                azure_endpoint=azure_endpoint,
-                api_key=api_key,
-                openai_api_version=openai_api_version
-            )
-            logging.info("Azure Embeddings initialized.")
-
-        elif service == "openai":
-            openai_api_key = os.getenv("PNNL_OPENAI_API_KEY", None)
-            if not openai_api_key:
-                raise KeyError("PNNL_OPENAI_API_KEY not found in environment.")
-            
-            logging.info("Initializing PNNL OpenAI Embeddings...")
-            embeddings = OpenAIEmbeddings(
-                base_url=pnnl_base_url,
-                api_key=pnnl_api_key,
-                model=pnnl_embeddings_deployment
-            )
-            logging.info("PNNL OpenAI Embeddings initialized.")
-
-        else:
-            raise KeyError(f"Unsupported embedding service: {service}")
+        logging.info("Embeddings initialized.")
 
         # Check if the vectorstore path exists and is a directory
         if os.path.exists(vectorstore_path) and os.path.isdir(vectorstore_path):
@@ -260,18 +197,18 @@ if creds_valid and vectorstore_functions_available:
             else:
                  st.sidebar.warning(f"Vector store loaded, but no files were found within it (using list_vectorstore_files).")
                  logging.warning("No files found in vector store index. Retriever not created.")
-                 # Keep creds_valid = True, but base_retriever will be None
+                 # Keep azure_creds_valid = True, but base_retriever will be None
 
         else:
              st.sidebar.error(f"Vector store directory not found or is not a directory: '{vectorstore_path}'. Cannot load retriever.")
              logging.error(f"Vector store path not found or invalid: {vectorstore_path}")
-             creds_valid = False # Cannot proceed without a store
+             azure_creds_valid = False # Cannot proceed without a store
 
     except Exception as e:
         st.error(f"Error loading vectorstore '{vectorstore_path}': {e}")
         logging.exception(f"Failed to load vector store from {vectorstore_path}") # Log full traceback
-        creds_valid = False # Treat as invalid if store loading fails
-elif not creds_valid:
+        azure_creds_valid = False # Treat as invalid if store loading fails
+elif not azure_creds_valid:
     st.sidebar.warning("Skipping vector store load due to missing Azure credentials.")
     logging.warning("Vector store loading skipped (missing Azure credentials).")
 elif not vectorstore_functions_available:
@@ -297,10 +234,10 @@ st.sidebar.warning(
 )
 
 st.sidebar.subheader("Select Source File(s)")
-if not files_in_store and creds_valid and vectorstore_functions_available:
+if not files_in_store and azure_creds_valid and vectorstore_functions_available:
      # Only show this warning if creds are valid and store was loaded, but no files found
      st.sidebar.warning("No files found in the loaded vector store index.")
-elif not creds_valid:
+elif not azure_creds_valid:
      st.sidebar.info("File selection disabled (check Azure credentials).")
 elif not vectorstore_functions_available:
      st.sidebar.info("File selection disabled (vector store functions unavailable).")
@@ -311,7 +248,7 @@ file_options = ["All"] + files_in_store
 default_selection = ["All"] if files_in_store else []
 
 # Determine if the multiselect should be disabled
-multiselect_disabled = not (creds_valid and base_retriever and files_in_store)
+multiselect_disabled = not (azure_creds_valid and base_retriever and files_in_store)
 
 selected_files_user_choice = st.sidebar.multiselect(
     "Files to Query",
@@ -446,19 +383,12 @@ def get_base_retriever_from_pdf(_file_hash, uploaded_file_name): # Use underscor
         logging.info(f"Creating embeddings for '{uploaded_file.name}' chunks...")
         # Use the globally defined embeddings if available and valid
         current_embeddings = embeddings
-        if not current_embeddings and creds_valid:
-            logging.warning("Re-initializing embeddings inside cached function (should ideally use global).")
-            if service == "azure":
-                current_embeddings = AzureOpenAIEmbeddings(
-                    azure_deployment=embeddings_deployment, azure_endpoint=azure_endpoint,
-                    api_key=api_key, openai_api_version=openai_api_version)
-                
-            elif service == "openai":
-                current_embeddings = OpenAIEmbeddings(
-                    base_url=pnnl_base_url,
-                    api_key=pnnl_api_key,
-                    model=pnnl_embeddings_deployment)    
-                            
+        if not current_embeddings and azure_creds_valid:
+             logging.warning("Re-initializing embeddings inside cached function (should ideally use global).")
+             current_embeddings = AzureOpenAIEmbeddings(
+                azure_deployment=embeddings_deployment, azure_endpoint=azure_endpoint,
+                api_key=api_key, openai_api_version=openai_api_version
+            )
         elif not current_embeddings:
              logging.error("Embeddings model not available inside cached function.")
              return None
@@ -530,7 +460,7 @@ def retrieve_docs_multi_query(state: GraphState) -> GraphState:
     logging.info(f"Processing question: '{question}' for files: {files_to_process}")
 
     # Handle case where Azure credentials might be missing (fallback or skip)
-    if not creds_valid:
+    if not azure_creds_valid:
          logging.warning("Azure credentials missing. Falling back to simple retrieval.")
          try:
              all_docs = base_retriever.get_relevant_documents(question)
@@ -602,7 +532,7 @@ def filter_documents(state: GraphState) -> GraphState:
 
     logging.info(f"Attempting to filter {len(original_documents)} retrieved chunks for structural content.")
 
-    if not creds_valid:
+    if not azure_creds_valid:
          logging.warning("Skipping structural filtering due to missing Azure credentials.")
          # Pass original documents through as 'filtered' documents
          output_state["filtered_documents"] = original_documents
@@ -708,7 +638,7 @@ def grade_documents(state: GraphState) -> GraphState:
 
     logging.info(f"Attempting to grade relevance of {len(documents_to_grade)} filtered documents for question: '{question}'")
 
-    if not creds_valid:
+    if not azure_creds_valid:
          logging.warning("Skipping relevance grading due to missing Azure credentials.")
          # Assume relevant if cannot grade, pass filtered docs through
          output_state["documents"] = documents_to_grade
@@ -818,7 +748,7 @@ def generate_individual_answers(state: GraphState) -> GraphState:
 
     logging.info(f"Generating answers based on {len(relevant_documents)} relevant documents across selected files.")
 
-    if not creds_valid:
+    if not azure_creds_valid:
          logging.warning("Skipping answer generation due to missing Azure credentials.")
          for filename in files_to_process:
              # Check if the file had relevant docs before assigning error message
@@ -950,7 +880,7 @@ def combine_answers(state: GraphState) -> GraphState:
     # Proceed with combination if there are substantive answers
     logging.info(f"Combining {len(answers_to_combine)} substantive answers from files: {list(answers_to_combine.keys())}")
 
-    if not creds_valid:
+    if not azure_creds_valid:
          logging.warning("Skipping answer combination due to missing Azure credentials.")
          # Simple concatenation as fallback
          combined = f"Could not properly combine answers due to missing credentials. Individual findings:\n\n"
@@ -1059,7 +989,7 @@ def decide_to_generate(state: GraphState) -> str:
 
 # --- Build LangGraph Workflow ---
 langgraph_app = None
-if creds_valid and base_retriever: # Need retriever for the graph to be useful
+if azure_creds_valid and base_retriever: # Need retriever for the graph to be useful
     try:
         logging.info("Building LangGraph workflow...")
         workflow = StateGraph(GraphState)
@@ -1097,7 +1027,7 @@ if creds_valid and base_retriever: # Need retriever for the graph to be useful
         st.sidebar.error(f"Failed to compile LangGraph: {e}")
         logging.exception("LangGraph compilation failed.")
         langgraph_app = None # Ensure it's None if compilation fails
-elif not creds_valid:
+elif not azure_creds_valid:
     st.sidebar.error("LangGraph compilation skipped: Missing Azure credentials.")
     logging.error("LangGraph compilation skipped (missing Azure credentials).")
 elif not base_retriever:
@@ -1109,9 +1039,9 @@ elif not base_retriever:
 
 # --- Determine if inputs should be disabled ---
 # This depends on credentials, retriever, graph, and file selection
-input_disabled = not (creds_valid and base_retriever and langgraph_app and files_to_process_in_graph)
+input_disabled = not (azure_creds_valid and base_retriever and langgraph_app and files_to_process_in_graph)
 disabled_reason = ""
-if not creds_valid: disabled_reason += "Azure credentials missing. "
+if not azure_creds_valid: disabled_reason += "Azure credentials missing. "
 if not base_retriever: disabled_reason += "Vector store not loaded/empty. "
 if not files_to_process_in_graph: disabled_reason += "No files selected/available in sidebar. "
 if not langgraph_app: disabled_reason += "RAG workflow failed. "
