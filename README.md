@@ -14,7 +14,7 @@
 ### Building the vectorstore
 From the root directory of this repository, run the following from a the terminal (ensuring that your virtual environment is active) to build the vectorstore:
 
-`python build_vectorestore.py <directory_containing_your_input_pdf_files>`
+`python build_vectorstore.py <directory_containing_your_input_pdf_files>`
 
 By default, this will create a vectorstore using FAISS named "test_faiss_store" in the root directory of your repository.  
 

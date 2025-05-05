@@ -22,6 +22,9 @@ from collections import defaultdict
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage # Import AIMessage
 
+# --- @tool decorator for FilteredDocs ---
+from langchain.tools import tool
+
 # --- Page Config (MUST BE FIRST STREAMLIT COMMAND) ---
 st.set_page_config(layout="wide", initial_sidebar_state="collapsed")  # collapse sidebar on load
 
@@ -577,6 +580,9 @@ def retrieve_docs_multi_query(state: GraphState) -> GraphState:
 
 
 # Node 2: Filter structural documents
+# --- @tool decorator ensures the model actually recognizes FilteredDocs---
+
+@tool
 class FilteredDocs(BaseModel):
     """Schema for the function call to identify indices of documents to keep."""
     keep_indices: List[int] = Field(
