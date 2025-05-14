@@ -13,7 +13,15 @@ from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
 from pydantic import BaseModel, Field
 from langchain.retrievers.multi_query import MultiQueryRetriever
 from dotenv import load_dotenv
-from typing import List, TypedDict, Annotated, Sequence, Dict, Optional
+from typing import (
+    List, 
+    TypedDict, 
+    Annotated, 
+    Sequence, 
+    Dict, 
+    Optional,
+    Union 
+)
 from collections import defaultdict
 import tiktoken
 
@@ -268,3 +276,45 @@ def add_new_pdfs_to_vectorstore(
         len({d.metadata['file'] for d in new_docs}),
     )
     return len(new_docs)
+
+
+def instantiate_retriever(
+    vectorstore: FAISS,
+    allowed_files: Optional[List[str]] = None,
+    top_n_similar: int = 25,
+):
+    """
+    Instantiate a retriever from an existing FAISS vectorstore.
+
+    Parameters
+    ----------
+    vectorstore : FAISS
+        The FAISS vectorstore that already contains your document embeddings.
+    allowed_files : list[str] | None, optional
+        Filenames to restrict retrieval to. When ``None`` or an empty list,
+        the retriever searches across **all** chunks in the store.
+    top_n_similar : int, default 25
+        Number of most‑similar chunks to return.
+
+    Returns
+    -------
+    VectorStoreRetriever
+        A LangChain retriever configured with the specified constraints.
+
+    Raises
+    ------
+    ValueError
+        If *vectorstore* is ``None``.
+    """
+    if vectorstore is None:
+        raise ValueError("`vectorstore` must be a valid FAISS instance.")
+
+    # Base kwargs
+    search_kwargs = {"k": top_n_similar}
+
+    # Add metadata filter only when filenames are supplied
+    if allowed_files:
+        search_kwargs["filter"] = {"file": {"$in": allowed_files}}
+
+    return vectorstore.as_retriever(search_kwargs=search_kwargs)
+
