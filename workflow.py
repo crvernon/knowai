@@ -12,6 +12,8 @@ from langchain.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
 from pydantic import BaseModel, Field
 from langchain.retrievers.multi_query import MultiQueryRetriever
+from langchain_core.language_models import BaseLanguageModel
+from langchain.retrievers import VectorStoreRetriever
 from dotenv import load_dotenv
 from typing import (
     List, 
@@ -22,6 +24,7 @@ from typing import (
     Optional,
     Union 
 )
+
 from collections import defaultdict
 import tiktoken
 
@@ -317,4 +320,163 @@ def instantiate_retriever(
         search_kwargs["filter"] = {"file": {"$in": allowed_files}}
 
     return vectorstore.as_retriever(search_kwargs=search_kwargs)
+
+
+def extract_using_multiquery(
+    question: str,
+    llm: "BaseLanguageModel",
+    retriever: "VectorStoreRetriever",
+    n_alternatives: int = 4,
+    k_per_query: int = 25,
+) -> List["Document"]:
+    """
+    Generate alternative phrasings of *question* (via ``MultiQueryRetriever``'s components)
+    **and** return the unique chunks retrieved from the provided *retriever*.
+
+    The function workflow is:
+
+    1. Use the ``llm_chain`` from ``MultiQueryRetriever`` to generate a text containing
+       multiple query formulations.
+    2. Parse this text (typically newline-separated queries) into a list of queries.
+    3. For each generated query (plus the original), run
+       ``retriever.get_relevant_documents`` (with *k_per_query*).
+    4. Merge all returned `Document`s, deduplicate them
+       (file‑name + page‑number + content), and return the unique list.
+
+    Parameters
+    ----------
+    question : str
+        The original user question.
+    llm : BaseLanguageModel
+        The LLM used by ``MultiQueryRetriever`` to craft alternative queries.
+    retriever : VectorStoreRetriever
+        A retriever tied to the target vectorstore.
+    n_alternatives : int, default 4
+        Number of alternative queries to generate.
+    k_per_query : int, default 25
+        Top‑*k* chunks to retrieve per query.
+
+    Returns
+    -------
+    List[Document]
+        Unique chunks drawn from the vectorstore across **all** generated
+        queries (including the original question).
+
+    Notes
+    -----
+    * The function silently falls back to returning chunks for just the
+      original question if alternative query generation fails.
+    * Deduplication key: ``(file, page, page_content)``.
+    """
+
+    # Initialize MultiQueryRetriever to access its llm_chain
+    # Note: Ensure the MultiQueryRetriever import path is correct for your Langchain version.
+    mqr = MultiQueryRetriever.from_llm(retriever=retriever, llm=llm)
+
+    alt_queries: List[str] = []
+    try:
+        # Directly use the llm_chain from MultiQueryRetriever to generate queries.
+        # The input to the llm_chain is typically a dict with the key "question".
+        chain_input = {"question": question}
+        # Invoke the chain; it will use default callback handling.
+        llm_response = mqr.llm_chain.invoke(chain_input)
+
+        raw_queries_text = ""
+        # Process the llm_response to get a single string of newline-separated queries.
+        if isinstance(llm_response, dict):
+            # Default output key for LLMChain is 'text'.
+            # MultiQueryRetriever's llm_chain is an LLMChain.
+            raw_queries_text = llm_response.get(mqr.llm_chain.output_key, "")
+            logging.debug(f"LLMChain response was a dict. Raw text: '{raw_queries_text[:100]}...'")
+        elif isinstance(llm_response, list):
+            logging.debug(
+                f"LLMChain response was a list. Attempting to process as list of query strings. Content: {llm_response}"
+            )
+            # If the LLM directly returns a list of query strings
+            if all(isinstance(item, str) for item in llm_response):
+                raw_queries_text = "\n".join(llm_response) # Join them into a single string
+                logging.debug(f"Joined list of strings into: '{raw_queries_text[:100]}...'")
+            else:
+                logging.warning(
+                    "LLMChain response was a list, but not all items are strings. Cannot process."
+                )
+        elif isinstance(llm_response, str):
+            logging.debug(
+                f"LLMChain response was a string directly. Processing as raw text. Response: {llm_response[:100]}..."
+            )
+            raw_queries_text = llm_response
+        else:
+            logging.warning(
+                f"Unexpected response type from llm_chain.invoke: {type(llm_response)}. Expected dict, list, or str."
+            )
+
+        if raw_queries_text:
+            # The default prompt for MultiQueryRetriever asks for newline-separated queries.
+            # Split the raw text by newlines and filter out any empty strings.
+            alt_queries = [q.strip() for q in raw_queries_text.split("\n") if q.strip()]
+            logging.debug(f"Parsed queries from raw text: {alt_queries}")
+        else:
+            logging.warning("No raw query text obtained or processed from LLM chain response for multi-query.")
+            alt_queries = []
+
+    except Exception:
+        logging.exception(
+            "Failed to generate or parse alternative queries using mqr.llm_chain.invoke"
+        )
+        alt_queries = [] # Ensure alt_queries is defined and empty on failure
+
+    # Clean & truncate to desired count (duplicates are already handled by list(dict.fromkeys(...)))
+    # Remove empty strings (already done by strip() and check in list comprehension)
+    # and duplicates, then truncate.
+    alt_queries = list(dict.fromkeys(alt_queries)) # Remove duplicates while preserving order
+    alt_queries = alt_queries[:n_alternatives]
+
+    # Always include the original question for retrieval
+    query_list = [question] + alt_queries
+
+    logging.info(f"Running retrieval for {len(query_list)} queries: {query_list}")
+
+    # Retrieve docs for each query
+    retrieved_docs: List["Document"] = []
+    for q_text in query_list:
+        try:
+            # Attempt to use 'k' parameter
+            docs_for_query = retriever.get_relevant_documents(q_text, k=k_per_query)
+        except TypeError as e:
+            # Check if TypeError is due to unexpected 'k' argument
+            if 'unexpected keyword argument \'k\'' in str(e).lower() or \
+               'got an unexpected keyword argument \'k\'' in str(e).lower():
+                logging.debug(f"Retriever for query '{q_text[:50]}...' does not support 'k' arg, retrieving all and slicing.")
+                docs_for_query = retriever.get_relevant_documents(q_text)
+                docs_for_query = docs_for_query[:k_per_query] # Manual slicing
+            else:
+                # Different TypeError, log and skip this query's docs
+                logging.exception(f"TypeError during retrieval for query: '{q_text[:50]}...'")
+                continue
+        except Exception:
+            logging.exception(f"Retrieval failed for query: '{q_text[:50]}...'")
+            continue # Skip this query's docs if any other exception occurs
+        retrieved_docs.extend(docs_for_query)
+
+    # Deduplicate documents
+    # Using a dictionary to store unique documents based on a key
+    unique_docs_map: Dict[tuple, "Document"] = {}
+    for doc in retrieved_docs:
+        # Create a unique key for each document.
+        # Ensure page_content is stripped for consistent keying.
+        # Handle cases where metadata might be missing 'file' or 'page'.
+        doc_file = doc.metadata.get("file") if hasattr(doc, 'metadata') and doc.metadata else None
+        doc_page = doc.metadata.get("page") if hasattr(doc, 'metadata') and doc.metadata else None
+        key = (
+            doc_file,
+            doc_page,
+            doc.page_content.strip() if hasattr(doc, 'page_content') else "",
+        )
+        if key not in unique_docs_map:
+            unique_docs_map[key] = doc
+
+    final_unique_docs = list(unique_docs_map.values())
+    logging.info(f"Retrieved {len(retrieved_docs)} chunks -> {len(final_unique_docs)} unique after dedup.")
+
+    return final_unique_docs
 
