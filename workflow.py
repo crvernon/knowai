@@ -37,6 +37,9 @@ openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01") # API v
 
 DEBUG_CAPTURE = [] # For capturing debug timing or messages
 
+logger = logging.getLogger(__name__)
+
+
 
 def load_faiss_vectorstore(path: str, embeddings) -> Optional[FAISS]:
     """
@@ -123,3 +126,145 @@ def list_vectorstore_files(vectorstore) -> List[str]:
     file_list = sorted(files)
     logging.info("Files in vectorstore: %s", file_list)
     return file_list
+
+
+def pdf_to_chunks(
+    file_path: str,
+    chunk_size: int = 1500,
+    chunk_overlap: int = 300,
+) -> List[Document]:
+    """
+    Load a single PDF file and split its pages into overlapping text chunks.
+
+    Each chunk is returned as a ``Document`` whose ``metadata`` dictionary
+    contains:
+        {"file": "<pdf-filename>", "page": <page-number>}
+
+    Parameters
+    ----------
+    file_path : str
+        Path to the PDF file.
+    chunk_size : int, default 1500
+        Maximum characters per chunk.
+    chunk_overlap : int, default 300
+        Number of characters overlapped between adjacent chunks.
+
+    Returns
+    -------
+    List[Document]
+        ``Document`` objects ready for vectorstore ingestion.
+    """
+    if not os.path.exists(file_path):
+        logging.error("PDF file does not exist: %s", file_path)
+        return []
+
+    filename = os.path.basename(file_path)
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        length_function=len,
+    )
+
+    chunks: List[Document] = []
+    try:
+        pdf = fitz.open(file_path)
+    except Exception:
+        logging.exception("Failed to open PDF: %s", file_path)
+        return []
+
+    for page_num in range(len(pdf)):
+        try:
+            text = pdf.load_page(page_num).get_text()
+        except Exception:
+            logging.exception("Failed to read page %d of %s", page_num + 1, filename)
+            continue
+
+        if not text:
+            continue
+
+        for piece in splitter.split_text(text):
+            chunks.append(
+                Document(
+                    page_content=piece,
+                    metadata={"file": filename, "page": page_num + 1},
+                )
+            )
+
+    pdf.close()
+    logging.info("Extracted %d chunks from %s", len(chunks), filename)
+    return chunks
+
+
+def add_new_pdfs_to_vectorstore(
+    directory_path: str,
+    vectorstore: FAISS,
+    chunk_size: int = 1500,
+    chunk_overlap: int = 300,
+) -> int:
+    """
+    Scan a directory for PDF files that are not yet present in the given
+    vectorstore and add their text chunks to the store.
+
+    A PDF is considered *already present* if its filename appears in the
+    ``"file"`` metadata of any existing document in the vectorstore.
+
+    Parameters
+    ----------
+    directory_path : str
+        Directory containing one or more ``.pdf`` files.
+    vectorstore : FAISS
+        An *already instantiated* FAISS vectorstore to update.
+    chunk_size : int, default 1500
+        Maximum characters per chunk when splitting text.
+    chunk_overlap : int, default 300
+        Number of characters overlapped between consecutive chunks.
+
+    Returns
+    -------
+    int
+        Total number of **new chunks** added to the vectorstore.
+    """
+    if vectorstore is None:
+        logging.error("Vectorstore is None; cannot add new PDFs.")
+        return 0
+
+    if not os.path.isdir(directory_path):
+        logging.error("Provided directory does not exist: %s", directory_path)
+        return 0
+
+    # Collect filenames already indexed
+    existing_files = set()
+    for _, doc in vectorstore.docstore._dict.items():
+        filename = doc.metadata.get("file")
+        if filename:
+            existing_files.add(filename)
+
+    new_docs: List[Document] = []
+    pdf_files = sorted(
+        f for f in os.listdir(directory_path) if f.lower().endswith(".pdf")
+    )
+
+    for filename in pdf_files:
+        if filename in existing_files:
+            logging.debug("Skipping %s (already indexed).", filename)
+            continue
+
+        file_path = os.path.join(directory_path, filename)
+        docs = pdf_to_chunks(
+            file_path=file_path,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
+        new_docs.extend(docs)
+
+    if not new_docs:
+        logging.info("No new PDFs found in %s.", directory_path)
+        return 0
+
+    vectorstore.add_documents(new_docs)
+    logging.info(
+        "Added %d chunks from %d new PDF(s) to vectorstore.",
+        len(new_docs),
+        len({d.metadata['file'] for d in new_docs}),
+    )
+    return len(new_docs)
