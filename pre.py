@@ -16,6 +16,7 @@ from langchain.retrievers.multi_query import MultiQueryRetriever
 from dotenv import load_dotenv
 from typing import List, TypedDict, Annotated, Sequence, Dict, Optional
 from collections import defaultdict
+import tiktoken
 
 # --- LangGraph Imports ---
 from langgraph.graph import StateGraph, END
@@ -294,39 +295,45 @@ else:
     files_to_process_in_graph = []
 
 
-# --- Helper Functions (PDF Processing - Kept for potential future use) ---
-def extract_pages_from_pdf(pdf_file):
-    """Extracts text page by page from an uploaded PDF file object, returning a list of (page_number, text, filename)."""
-    pages_content = []
-    file_name = pdf_file.name if hasattr(pdf_file, 'name') else "Unknown Filename"
+
+# --- Helper: Token‑count Logging ---
+def log_token_count(llm, prompt_or_messages, description: str = ""):
+    """
+    Logs and captures (via DEBUG_CAPTURE) the token count for a prompt or list of
+    chat messages. Tries llm.get_num_tokens first, then falls back to tiktoken.
+    """
+    token_count = None
+
+    # 1) Preferred: use LangChain's built‑in counting (if available)
     try:
-        pdf_bytes = pdf_file.getvalue()
-        if not pdf_bytes:
-             logging.error(f"Uploaded file '{file_name}' is empty.")
-             st.error(f"Uploaded file '{file_name}' is empty.")
-             return None
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        logging.info(f"Processing PDF '{file_name}' with {len(doc)} pages.")
-        for page_num in range(len(doc)):
-            page = doc.load_page(page_num)
-            text = page.get_text()
-            if text and text.strip(): # Only add if text exists and is not just whitespace
-                pages_content.append((page_num + 1, text, file_name))
-        doc.close()
-        if not pages_content:
-             logging.warning(f"Could not extract any text content from PDF '{file_name}'.")
-             st.warning(f"Could not extract any text from '{file_name}'.")
-             return None
-        logging.info(f"Extracted text from {len(pages_content)} pages in '{file_name}'.")
-        return pages_content
-    except fitz.fitz.FileDataError:
-         logging.error(f"Invalid or corrupted PDF file: {file_name}")
-         st.error(f"Invalid or corrupted PDF file: {file_name}", icon="📄")
-         return None
+        if hasattr(llm, "get_num_tokens"):
+            token_count = llm.get_num_tokens(prompt_or_messages)
     except Exception as e:
-        logging.exception(f"Error reading PDF '{file_name}'") # Log full traceback
-        st.error(f"Error reading PDF '{file_name}': {e}", icon="📄")
-        return None
+        logging.debug(f"get_num_tokens failed for '{description}': {e}")
+
+    # 2) Fallback: use tiktoken directly
+    if token_count is None:
+        try:
+            # Derive a reasonable model name for tiktoken; default to cl100k_base
+            model_name = getattr(llm, "model_name", "gpt-4o")
+            try:
+                enc = tiktoken.encoding_for_model(model_name)
+            except KeyError:
+                enc = tiktoken.get_encoding("cl100k_base")
+
+            if isinstance(prompt_or_messages, (list, tuple)):
+                text_for_count = "".join(str(m) for m in prompt_or_messages)
+            else:
+                text_for_count = str(prompt_or_messages)
+
+            token_count = len(enc.encode(text_for_count))
+        except Exception as e:
+            logging.debug(f"tiktoken counting failed for '{description}': {e}")
+            token_count = -1  # Indicate failure to count
+
+    logging.info(f"Token count ({description}): {token_count}")
+    # Capture in DEBUG_CAPTURE for on‑screen debugging
+    DEBUG_CAPTURE.append(f"Token count ({description}): {token_count}")
 
 # --- Caching (Retriever Creation - Kept for potential future use) ---
 # Note: Using st.cache_resource for things like models or retrievers is appropriate.
@@ -442,7 +449,9 @@ class GraphState(TypedDict):
 # Node 1: Retrieve documents using MultiQueryRetriever
 def retrieve_docs_multi_query(state: GraphState) -> GraphState:
     """Retrieves documents using MultiQueryRetriever and filters by selected files."""
+
     logging.info("--- Starting Node: retrieve_docs_multi_query ---")
+
     question = state["question"]
     base_retriever = state["base_retriever"]
     files_to_process = state["files_to_process"]
@@ -466,30 +475,61 @@ def retrieve_docs_multi_query(state: GraphState) -> GraphState:
          logging.warning("Azure credentials missing. Falling back to simple retrieval.")
          try:
              all_docs = base_retriever.get_relevant_documents(question)
+
              # Filter AFTER simple retrieval
              filtered_docs = [doc for doc in all_docs if doc.metadata.get("file") in files_to_process]
              logging.info(f"Retrieved {len(filtered_docs)} documents via simple fallback for files: {files_to_process}.")
+
              output_state["original_documents"] = filtered_docs
-             # In fallback, we might skip filtering/grading later, TBD by graph logic
+             output_state["documents"] = output_state["original_documents"]
+
          except Exception as e:
              logging.error(f"Error during simple fallback retrieval: {e}")
-             # Leave output_state["original_documents"] as empty list
+
          return {**state, **output_state}
 
     # Proceed with MultiQueryRetriever if credentials are valid
     try:
         logging.info(f"Initializing MultiQueryRetriever for question: '{question}'")
+
         llm_for_queries = AzureChatOpenAI(
-            temperature=0, api_key=api_key, openai_api_version=openai_api_version,
-            azure_deployment=deployment, azure_endpoint=azure_endpoint,
-        )
-        multi_query_retriever = MultiQueryRetriever.from_llm(
-            retriever=base_retriever, llm=llm_for_queries
+            temperature=0, 
+            api_key=api_key, 
+            openai_api_version=openai_api_version,
+            azure_deployment=deployment,
+            azure_endpoint=azure_endpoint,
         )
 
+        multi_query_retriever = MultiQueryRetriever.from_llm(
+            retriever=base_retriever, 
+            llm=llm_for_queries
+        )
+
+        # --- Capture and log the alternative queries generated by MultiQueryRetriever ---
+        alt_queries = []
+        # Newer versions expose .generate_queries(); fall back to the protected method otherwise
+        if hasattr(multi_query_retriever, "generate_queries"):
+            try:
+                alt_queries = multi_query_retriever.generate_queries(question)
+            except Exception as e:
+                logging.debug(f"generate_queries failed: {e}")
+        elif hasattr(multi_query_retriever, "_generate_queries"):
+            try:
+                alt_queries = multi_query_retriever._generate_queries(question)
+            except Exception as e:
+                logging.debug(f"_generate_queries failed: {e}")
+
+        if alt_queries:
+            logging.info(f"MultiQueryRetriever generated {len(alt_queries)} alternative queries: {alt_queries}")
+            DEBUG_CAPTURE.append(
+                "MultiQueryRetriever alternative queries:\n" + "\n".join(f"- {q}" for q in alt_queries)
+            )
+
         logging.info(f"Invoking MultiQueryRetriever...")
+
         # Retrieve documents based on multiple generated queries
         unique_docs_unfiltered = multi_query_retriever.invoke(input=question)
+
         logging.info(f"MultiQueryRetriever returned {len(unique_docs_unfiltered)} total unique chunks before file filtering.")
 
         # Filter the retrieved documents based on the user's file selection
@@ -497,245 +537,22 @@ def retrieve_docs_multi_query(state: GraphState) -> GraphState:
             doc for doc in unique_docs_unfiltered
             if doc.metadata.get("file") in files_to_process
         ]
-        logging.info(f"Filtered down to {len(unique_docs_filtered)} chunks based on selected file(s): {files_to_process}")
+
+        # logging.info(f"Filtered down to {len(unique_docs_filtered)} chunks based on selected file(s): {files_to_process}")
+
         output_state["original_documents"] = unique_docs_filtered
+        output_state["documents"] = output_state["original_documents"]
 
     except Exception as e:
         logging.exception("Error during multi-query retrieval") # Log full traceback
-        # Leave output_state["original_documents"] as empty list
+
     finally:
         logging.info("--- Finished Node: retrieve_docs_multi_query ---")
         return {**state, **output_state} # Merge output with input state
 
 
-# Node 2: Filter structural documents
-class FilteredDocs(BaseModel):
-    """Schema for the function call to identify indices of documents to keep."""
-    keep_indices: List[int] = Field(
-        description="List of zero-based indices of the documents that should be kept (i.e., are not primarily structural like ToC, headers, footers, or simple reference lists)."
-    )
 
-def filter_documents(state: GraphState) -> GraphState:
-    """Filters initially retrieved documents to remove structurally irrelevant ones."""
-    logging.info("--- Starting Node: filter_documents ---")
-
-
-    original_documents = state["original_documents"]
-    question = state["question"] # Question might help LLM understand context
-
-    # Initialize return keys
-    output_state = {
-        "filtered_documents": [], # This node populates this
-        "documents": [],          # Populated by grading node
-        "relevance_grade": None   # Populated by grading node
-    }
-
-#     if not original_documents:
-#         logging.info("No documents received from retrieval node to filter.")
-#         return {**state, **output_state}
-
-#     logging.info(f"Attempting to filter {len(original_documents)} retrieved chunks for structural content.")
-
-#     if not azure_creds_valid:
-#          logging.warning("Skipping structural filtering due to missing Azure credentials.")
-#          # Pass original documents through as 'filtered' documents
-#          output_state["filtered_documents"] = original_documents
-#          return {**state, **output_state}
-
-    try:
-#         # Define the LLM with the tool for filtering
-#         filtering_llm = AzureChatOpenAI(
-#             temperature=0, api_key=api_key, openai_api_version=openai_api_version,
-#             azure_deployment=deployment, azure_endpoint=azure_endpoint,
-#         ).bind_tools([FilteredDocs], tool_choice="FilteredDocs") # Force tool use
-
-#         # Prepare context for the filtering prompt
-#         doc_context = ""
-#         for i, doc in enumerate(original_documents):
-#             filename = doc.metadata.get('file', 'Unknown File')
-#             page_num = doc.metadata.get('page', 'N/A')
-#             # Truncate long chunks if necessary, though LLM context limits are large now
-#             content_preview = (doc.page_content[:500] + '...') if len(doc.page_content) > 500 else doc.page_content
-#             doc_context += f"--- Document Index {i} (File: {filename}, Page: {page_num}) ---\n{content_preview}\n\n"
-
-#         # Define the prompt for the filtering LLM
-#         # This prompt is crucial for effective filtering. Adjust based on observed errors.
-#         filtering_prompt_template = """You are an expert document analyst. Your task is to identify document chunks that are primarily structural elements like Table of Contents entries, page headers/footers, indices, reference lists, or lists of figures/tables. These structural elements are unlikely to contain direct answers to specific content-based questions about technical reports.
-
-# Analyze the following document chunks provided below, each marked with a 'Document Index', 'File', and 'Page'. The user's question is: "{question}"
-
-# Document Chunks:
-# {doc_context}
-
-# Based *only* on the content of each chunk, identify the indices of the documents that ARE LIKELY TO CONTAIN SUBSTANTIVE CONTENT (prose, data, analysis, findings, methods, explanations) relevant to potentially answering the user's question. Ignore chunks that are just lists of section titles with page numbers (like a ToC), repetitive headers/footers, bibliographies, or cover page elements unless they uniquely contain relevant information not present elsewhere.
-
-# Use the 'FilteredDocs' tool to return the list of zero-based indices of the documents to **keep**. Return ONLY the indices to keep. If all documents appear structural or irrelevant, return an empty list.
-# """
-#         filtering_prompt = PromptTemplate(
-#             template=filtering_prompt_template,
-#             input_variables=["doc_context", "question"],
-#         )
-
-#         # Create and invoke the filtering chain
-#         filtering_chain = filtering_prompt | filtering_llm
-#         logging.info("Invoking filtering LLM...")
-#         response = filtering_chain.invoke({"doc_context": doc_context, "question": question})
-#         logging.info("Filtering LLM response received.")
-
-#         # Process the LLM response
-#         kept_indices = []
-#         if response.tool_calls and response.tool_calls[0]['name'] == 'FilteredDocs':
-#             kept_indices = response.tool_calls[0]['args'].get('keep_indices', [])
-#             # Validate indices
-#             valid_indices = [i for i in kept_indices if isinstance(i, int) and 0 <= i < len(original_documents)]
-#             if len(valid_indices) != len(kept_indices):
-#                  logging.warning(f"Filtering LLM returned invalid indices. Original: {kept_indices}, Validated: {valid_indices}")
-#             kept_indices = valid_indices
-#             logging.info(f"Filtering LLM identified {len(kept_indices)} documents to keep out of {len(original_documents)}.")
-#         else:
-#              # Log the unexpected response for debugging
-#              logging.warning(f"Filtering LLM did not return the expected 'FilteredDocs' tool call. Response: {response}. Keeping all documents for safety.")
-#              # Pass original docs through if filtering fails unexpectedly
-#              output_state["filtered_documents"] = original_documents
-#              return {**state, **output_state}
-
-#         # Create the list of filtered documents
-#         filtered_docs = [original_documents[i] for i in kept_indices]
-#         logging.info(f"Filtered down to {len(filtered_docs)} potentially substantive documents.")
-#         output_state["filtered_documents"] = filtered_docs
-
-        output_state["filtered_documents"] = original_documents
-
-    except Exception as e:
-        logging.exception("Error during document filtering")
-        logging.warning("Filtering failed due to error. Passing all original documents to grading.")
-        # Pass original docs through if filtering errors
-        output_state["filtered_documents"] = original_documents
-
-    finally:
-        logging.info("--- Finished Node: filter_documents ---")
-        return {**state, **output_state}
-
-
-# Node 3: Grade documents for relevance
-def grade_documents(state: GraphState) -> GraphState:
-    """Grades the filtered documents based on relevance to the question."""
-    logging.info("--- Starting Node: grade_documents ---")
-    question = state["question"]
-    # Grade the documents that *passed* the filtering step
-    documents_to_grade = state["filtered_documents"]
-
-    # Initialize return keys
-    output_state = {
-        "documents": [],         # This node populates this with relevant docs
-        "relevance_grade": "no"  # Default grade to 'no'
-    }
-
-    # Handle case where filtering might have failed or returned None/empty
-    if documents_to_grade is None:
-         logging.warning("Documents to grade is None (likely upstream error). Setting to empty list.")
-         documents_to_grade = []
-         output_state["relevance_grade"] = "error_upstream" # Indicate issue
-         return {**state, **output_state}
-
-    if not documents_to_grade:
-         logging.info("No documents remaining after filtering to grade.")
-         # Keep grade as 'no', documents as empty
-         return {**state, **output_state}
-
-    logging.info(f"Attempting to grade relevance of {len(documents_to_grade)} filtered documents for question: '{question}'")
-
-    if not azure_creds_valid:
-         logging.warning("Skipping relevance grading due to missing Azure credentials.")
-         # Assume relevant if cannot grade, pass filtered docs through
-         output_state["documents"] = documents_to_grade
-         output_state["relevance_grade"] = "skipped"
-         return {**state, **output_state}
-
-    try:
-        # Define the LLM for grading
-        llm_grader = AzureChatOpenAI(
-            temperature=0, api_key=api_key, openai_api_version=openai_api_version,
-            azure_deployment=deployment, azure_endpoint=azure_endpoint,
-        )
-
-        # Define the grading function schema (tool)
-        grading_function = {
-            "name": "grade_relevance",
-            "description": "Determine if the provided document chunks collectively contain information relevant to answering the user's question.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "relevant": {
-                        "type": "string",
-                        "enum": ["yes", "no"],
-                        "description": "Output 'yes' if the documents contain information directly relevant to answering the question, 'no' otherwise."
-                    }
-                },
-                "required": ["relevant"]
-            },
-        }
-
-        # Define the grading prompt
-        # This prompt is critical. Adjust based on whether it's too strict or too lenient.
-        grading_prompt_template = """You are a strict grader assessing the relevance of pre-filtered document chunks to a specific user question. Your goal is to determine if these chunks contain information that **directly answers** the question.
-
-User Question:
-{question}
-
-Potentially Relevant Document Chunks (pre-filtered for structural content):
-{documents}
-
-Instructions:
-1. Read the User Question carefully.
-2. Analyze the provided Document Chunks.
-3. Decide if the information within these chunks, taken together, can **directly** address and answer the user's question. Do not consider tangential or background information as sufficient unless it's essential to the answer.
-4. Respond using the 'grade_relevance' function call. Output 'yes' ONLY if direct answering information is present, otherwise output 'no'. Be conservative; if uncertain, lean towards 'no'.
-"""
-        grading_prompt = PromptTemplate(
-            template=grading_prompt_template,
-            input_variables=["question", "documents"],
-        )
-
-        # Prepare context for the grader
-        doc_texts_with_meta = "\n\n".join([f"--- File: {d.metadata.get('file', 'Unknown')}, Page: {d.metadata.get('page', 'N/A')} ---\n{d.page_content}" for d in documents_to_grade])
-
-        # Create and invoke the grading chain
-        grader_chain = grading_prompt | llm_grader.bind_tools([grading_function], tool_choice="grade_relevance") # Force tool use
-        logging.info("Invoking grading LLM...")
-        response = grader_chain.invoke({"question": question, "documents": doc_texts_with_meta})
-        logging.info("Grading LLM response received.")
-
-        # Process the grading response
-        is_relevant = "no" # Default to no
-        if response.tool_calls and response.tool_calls[0]['name'] == 'grade_relevance':
-            is_relevant = response.tool_calls[0]['args'].get('relevant', 'no')
-            logging.info(f"Relevance Grade determined by LLM: {is_relevant.upper()}")
-        else:
-             logging.warning(f"Grader LLM did not return expected function call format. Response: {response}. Assuming 'no' relevance.")
-             is_relevant = "no" # Ensure it's 'no' if format is wrong
-
-        # Update state based on the grade
-        output_state["relevance_grade"] = is_relevant
-        if is_relevant == "yes":
-            logging.info("Decision: Relevant documents found. Passing them to the next step.")
-            # Keep the graded documents (which were the filtered ones) in the final 'documents' key
-            output_state["documents"] = documents_to_grade
-        else:
-            logging.info("Decision: No relevant documents found after grading.")
-            # Keep 'documents' as empty list
-
-    except Exception as e:
-        logging.exception("Error during document grading")
-        # Keep 'documents' as empty, set grade to 'error'
-        output_state["documents"] = []
-        output_state["relevance_grade"] = "error"
-    finally:
-        logging.info("--- Finished Node: grade_documents ---")
-        return {**state, **output_state}
-
-
-# Node 4: Generate Answer for each file (using relevant documents)
+# Node: Generate Answer for each file (using relevant documents)
 async def generate_individual_answers(state: GraphState) -> GraphState:
 
     t_start_node = time.time()
@@ -1024,26 +841,16 @@ if azure_creds_valid and base_retriever: # Need retriever for the graph to be us
 
         # Add nodes to the graph
         workflow.add_node("retrieve", retrieve_docs_multi_query)
-        workflow.add_node("filter_documents", filter_documents)
-        workflow.add_node("grade_documents", grade_documents)
         workflow.add_node("generate_individual", generate_individual_answers)
         workflow.add_node("combine_answers", combine_answers)
 
         # Define the graph's flow (edges)
         workflow.set_entry_point("retrieve")
-        workflow.add_edge("retrieve", "filter_documents")
-        workflow.add_edge("filter_documents", "grade_documents")
-        workflow.add_conditional_edges(
-            "grade_documents", # Source node
-            decide_to_generate, # Function to decide the next step
-            {
-                # Mapping: decision string -> target node
-                "generate_individual": "generate_individual",
-                "end_no_relevance": END # End the graph if no relevant docs
-            }
-        )
+        workflow.add_edge("retrieve", "generate_individual")
+
         # After generating individual answers, combine them
         workflow.add_edge("generate_individual", "combine_answers")
+
         # The final combined answer marks the end of the successful path
         workflow.add_edge("combine_answers", END)
 
@@ -1051,6 +858,7 @@ if azure_creds_valid and base_retriever: # Need retriever for the graph to be us
         langgraph_app = workflow.compile()
         # st.sidebar.success("Multi-file RAG workflow compiled.")
         logging.info("LangGraph workflow compiled successfully.")
+
     except Exception as e:
         st.sidebar.error(f"Failed to compile LangGraph: {e}")
         logging.exception("LangGraph compilation failed.")
@@ -1090,10 +898,11 @@ with q_col1:
         help=disabled_reason or "Select a predefined question or choose the first option to type your own below."
     )
     custom_question_disabled = selected_question != PREDEFINED_QUESTIONS[0] or input_disabled
-    custom_question = st.chat_input(
+    custom_question = st.text_input(
         "Enter your custom question here...",
         key="custom_question_input",
-        disabled=custom_question_disabled
+        disabled=custom_question_disabled,
+        placeholder="Type your question here"
     )
 
 with q_col2:
@@ -1129,6 +938,7 @@ show_chat_history = any(m.get("role") == "assistant" for m in st.session_state.m
 # Iterate through the stored messages and display them
 # if show_chat_history:
 st.subheader("Explore your Findings")
+
 # Show a waiting message until the first assistant response appears
 if not show_chat_history:
     st.info("Awaiting Response")
