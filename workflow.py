@@ -51,14 +51,49 @@ DEBUG_CAPTURE = [] # For capturing debug timing or messages
 logger = logging.getLogger(__name__)
 
 
+class GraphState(TypedDict):
 
-def load_faiss_vectorstore(path: str, embeddings) -> Optional[FAISS]:
+    embeddings: Union[None, AzureOpenAIEmbeddings]
+    vectorstore_path: Union[None, str]
+    vectorstore: Union[None, FAISS]
+    question: str
+    documents: List[Document]
+    individual_answers: Dict[str, str]
+
+
+workflow = StateGraph(GraphState)
+
+# Add nodes to the graph
+workflow.add_node("load_vectorstore", load_faiss_vectorstore)
+
+
+def instantiate_embeddings(state: GraphState):
+
+    # Retrieve current embeddings instantiation state
+    embeddings_state = state.get("embeddings", None) 
+
+    if embeddings_deployment:
+        return state
+    
+    else:
+        return {
+            **state, 
+            "embeddings": AzureOpenAIEmbeddings(
+                azure_deployment=embeddings_deployment,
+                azure_endpoint=azure_endpoint,
+                api_key=api_key,
+                openai_api_version=openai_api_version
+            )
+        }
+
+
+def load_faiss_vectorstore(state: GraphState) -> Optional[FAISS]:
     """
     Load a FAISS vectorstore that was previously saved to disk.
 
     Parameters
     ----------
-    path : str
+    vectorstore_path : str
         Directory containing the serialized FAISS index (e.g., ``index.faiss``) and
         accompanying metadata (``index.pkl``).
     embeddings :
@@ -79,26 +114,39 @@ def load_faiss_vectorstore(path: str, embeddings) -> Optional[FAISS]:
     * Any exceptions during loading are caught and logged; the function returns
       ``None`` so callers can handle the failure gracefully.
     """
-    if not os.path.exists(path):
-        logging.error("FAISS vectorstore path does not exist: %s", path)
-        return None
+    # Retrieve state variables
+    vectorstore_path = state.get("vectorstore_path", None)
+    vectorstore = state.get("vectorstore", None)
+    embeddings = state.get("embeddings", None)
 
-    if not os.path.isdir(path):
-        logging.error("Provided FAISS vectorstore path is not a directory: %s", path)
-        return None
+    if vectorstore:
+        return state
+    
+    else:
+        if not os.path.exists(vectorstore_path):
+            logging.error("FAISS vectorstore path does not exist: %s", vectorstore_path)
+            return None
 
-    try:
-        logging.info("Loading FAISS vectorstore from '%s' ...", path)
-        vectorstore = FAISS.load_local(
-            path,
-            embeddings,
-            allow_dangerous_deserialization=True
-        )
-        logging.info("FAISS vectorstore loaded with %d embeddings.", vectorstore.index.ntotal)
-        return vectorstore
-    except Exception:
-        logging.exception("Failed to load FAISS vectorstore from '%s'", path)
-        return None
+        if not os.path.isdir(vectorstore_path):
+            logging.error("Provided FAISS vectorstore path is not a directory: %s", vectorstore_path)
+            return None
+        
+        if embeddings is None:
+            logging.error("Embeddings not yet instantiated.  Review workflow to ensure this node is available to the graph.")
+            return None 
+        
+        try:
+            logging.info("Loading FAISS vectorstore from '%s' ...", vectorstore_path)
+            vectorstore = FAISS.load_local(
+                vectorstore_path,
+                embeddings,
+                allow_dangerous_deserialization=True
+            )
+            logging.info("FAISS vectorstore loaded with %d embeddings.", vectorstore.index.ntotal)
+            return vectorstore
+        except Exception:
+            logging.exception("Failed to load FAISS vectorstore from '%s'", vectorstore_path)
+            return None
 
 
 def list_vectorstore_files(vectorstore) -> List[str]:
@@ -480,3 +528,5 @@ def extract_using_multiquery(
 
     return final_unique_docs
 
+
+# generate a function to 

@@ -51,8 +51,12 @@ def get_retriever_from_directory(
     # Load or initialize vectorstore
     if persist and os.path.exists(persist_directory):
         try:
-            vectorstore = FAISS.load_local(persist_directory, embeddings)
-            logger.info(f"Loaded existing FAISS store from {persist_directory}")
+            vectorstore = FAISS.load_local(
+                persist_directory,
+                embeddings,
+                allow_dangerous_deserialization=True
+            )
+            logger.info(f"Loaded existing FAISS store from {persist_directory} with dangerous deserialization allowed")
         except Exception as e:
             logger.error(f"Error loading existing FAISS store: {e}")
             vectorstore = None

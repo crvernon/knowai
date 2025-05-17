@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "knowai"
+version = "0.1.0"
+authors = [
+  { name="Chris R. Vernon", email="chris.vernon@pnnl.gov" },
+]
+description = "A conversational RAG agent using LangGraph"
+readme = "README.md"
+requires-python = ">=3.13" # Adjusted based on PyMuPDF and asyncio features
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License", # Or your chosen license
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "langchain>=0.1.0,<0.2.0", # Specify your langchain version range
+    "langchain-community>=0.0.20,<0.1.0",
+    "langchain-openai>=0.1.0,<0.2.0",
+    "langgraph>=0.0.30,<0.1.0",
+    "python-dotenv>=1.0.0",
+    "PyMuPDF>=1.23.0", # fitz
+    "faiss-cpu>=1.7.0", # Or faiss-gpu if applicable
+    "openai>=1.0.0", # For AzureOpenAIEmbeddings, AzureChatOpenAI
+    "httpx>=0.24.0", # Often a dependency of openai or langchain
+    "tiktoken>=0.5.0",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/yourusername/knowai" # Optional
+"Bug Tracker" = "https://github.com/yourusername/knowai/issues" # Optional
