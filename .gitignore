@@ -1,5 +1,6 @@
-# vectorstore
+# vectorstores
 test_faiss_store/
+wmp_faiss_text-embedding-3-large/
 
 # pyenv
 .python-version
