@@ -29,14 +29,39 @@ _sessions: Dict[str, KnowAIAgent] = {}
 
 
 class InitPayload(BaseModel):
-    """Payload to start a fresh KnowAIAgent session."""
+    """
+    Payload to initialize a KnowAIAgent session.
+
+    Attributes:
+        vectorstore_s3_uri (str): URI of the vectorstore, either an S3 URI
+            (e.g., "s3://bucket/path") or a local filesystem path.
+        combine_threshold (Optional[int]): Threshold for combining
+            intermediate results. Defaults to None for the agent’s default.
+        max_conversation_turns (Optional[int]): Maximum number of past
+            conversation turns to retain. Defaults to None for the agent’s
+            default.
+    """
     vectorstore_s3_uri: str
     combine_threshold: Optional[int] = None
     max_conversation_turns: Optional[int] = None
 
 
 class AskPayload(BaseModel):
-    """Payload for each conversational turn."""
+    """
+    Payload for a conversational turn with the KnowAIAgent.
+
+    Attributes:
+        session_id (str): Unique identifier for the conversation session.
+        question (str): The user’s current question to process.
+        selected_files (Optional[List[str]]): List of file paths to include in
+            retrieval. Defaults to None.
+        bypass_individual_gen (bool): Whether to skip individual file-level
+            generation. Defaults to False.
+        n_alternatives_override (Optional[int]): Override for the number of
+            answer alternatives. Defaults to None.
+        k_per_query_override (Optional[int]): Override for the number of chunks
+            retrieved per query. Defaults to None.
+    """
     session_id: str
     question: str
     selected_files: Optional[List[str]] = None
@@ -46,7 +71,16 @@ class AskPayload(BaseModel):
 
 
 def _download_vectorstore(s3_uri: str, dst_dir: str = "/tmp/vectorstore") -> str:
-    """Download the FAISS vector‑store from S3 the first time the service starts."""
+    """
+    Download the FAISS vectorstore from S3 if not already present locally.
+
+    Args:
+        s3_uri (str): S3 URI of the vectorstore prefix (e.g., "s3://bucket/path").
+        dst_dir (str): Destination directory for download. Defaults to "/tmp/vectorstore".
+
+    Returns:
+        str: Path to the local vectorstore directory.
+    """
     import boto3
     from pathlib import Path
 
@@ -71,8 +105,24 @@ def _download_vectorstore(s3_uri: str, dst_dir: str = "/tmp/vectorstore") -> str
 # --------------------------------------------------------------------------- #
 @app.post("/initialize")
 async def initialize(payload: InitPayload):
-    """Create a new KnowAIAgent, download the vectorstore, return a session_id."""
-    vec_path = _download_vectorstore(payload.vectorstore_s3_uri)
+    """
+    Initialize a KnowAIAgent session and download or locate the vectorstore.
+
+    Args:
+        payload (InitPayload): Initialization parameters, including the
+            vectorstore URI (S3 or local), combine threshold, and maximum
+            conversation turns.
+
+    Returns:
+        dict: A JSON-serializable dict containing:
+            session_id (str): Unique identifier for the created session.
+    """
+    # Determine vectorstore path: download if on S3, else use local path
+    uri = payload.vectorstore_s3_uri
+    if uri.startswith("s3://"):
+        vec_path = _download_vectorstore(uri)
+    else:
+        vec_path = uri
     agent = KnowAIAgent(
         vectorstore_path=vec_path,
         combine_threshold=payload.combine_threshold or 50,
@@ -85,7 +135,17 @@ async def initialize(payload: InitPayload):
 
 @app.post("/ask")
 async def ask(payload: AskPayload):
-    """Run a single RAG turn and return JSON results."""
+    """
+    Process a conversational turn by invoking the KnowAIAgent.
+
+    Args:
+        payload (AskPayload): Payload containing session ID, question, and
+            optional parameters for file selection and overrides.
+
+    Returns:
+        dict: JSON-serializable result from the agent, including generation,
+            individual answers, and retrieved documents.
+    """
     agent = _sessions.get(payload.session_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Unknown session_id")
