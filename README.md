@@ -1,9 +1,12 @@
-## Agentic AI pipeline for multiple, large PDF reports interrogation
+[![test](https://github.com/crvernon/knowai/actions/workflows/build.yml/badge.svg)](https://github.com/crvernon/knowai/actions/workflows/build.yml)
+
+## knowai
+#### An agentic AI pipeline for multiple, large PDF reports interrogation
 
 ### Set up
 - Clone this repostiory into a local directory of your choosing
 - Build a virtual environment 
-- Install the requirements in `requirements.txt`
+- Install `knowai` by running:  `pip install knowai` from the root directory of your clone
 - Configure a `.env` file with the following:
     - `AZURE_OPENAI_API_KEY` - Your API key
     - `AZURE_OPENAI_ENDPOINT` - Your Azure endpoint
@@ -14,14 +17,13 @@
 ### Building the vectorstore
 From the root directory of this repository, run the following from a the terminal (ensuring that your virtual environment is active) to build the vectorstore:
 
-`python build_vectorstore.py <directory_containing_your_input_pdf_files>`
+`python scripts/build_vectorstore.py <directory_containing_your_input_pdf_files> --vectorstore_path <directory_name_for_vectorstore>`
 
 By default, this will create a vectorstore using FAISS named "test_faiss_store" in the root directory of your repository.  
 
-### Running the app
+### Running the knowai in a simple chatbot example via streamlit
 From the root directory, run the following in a terminal after you have your virtual environment active:  
 
-`streamlit run app.py`
+`streamlit run app_chat_simple.py`
 
 This will open the app in your default browser.
-
