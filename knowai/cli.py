@@ -6,6 +6,7 @@ Run via:  `docker run … knowai`  (Dockerfile entrypoint already points here)
 import asyncio
 import os
 import uuid
+from importlib.metadata import version as _pkg_version, PackageNotFoundError
 from typing import List, Optional, Dict
 
 from fastapi import FastAPI, HTTPException
@@ -14,7 +15,12 @@ from pydantic import BaseModel
 from .core import KnowAIAgent
 
 
-app = FastAPI(title="knowai‑service", version="1.0")
+try:
+    _KNOWAI_VERSION = _pkg_version("knowai")
+except PackageNotFoundError:
+    _KNOWAI_VERSION = "0.0.0"
+
+app = FastAPI(title="knowai‑service", version=_KNOWAI_VERSION)
 
 # --------------------------------------------------------------------------- #
 # Session management (very simple in‑memory cache; swap for Redis if needed)
