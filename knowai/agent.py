@@ -18,27 +18,16 @@ from langchain_core.vectorstores import VectorStoreRetriever
 from langchain_core.embeddings import Embeddings as LangchainEmbeddings
 from langchain_core.prompts import PromptTemplate 
 from langchain_core.output_parsers import StrOutputParser 
-from langgraph.graph import StateGraph, END
+from langgraph.graph import StateGraph, END, Graph
 
 # Constants (can be overridden by KnowAIAgent constructor)
 K_CHUNKS_RETRIEVER_DEFAULT = 25 
 COMBINE_THRESHOLD_DEFAULT = 3
 MAX_CONVERSATION_TURNS_DEFAULT = 15
 
-# --- Content Policy Error Handling ---
+# Content Policy Error Handling
 CONTENT_POLICY_MESSAGE = "Due to content management policy issues with the AI provider, we are not able to provide a response to this topic. Please rephrase your question and try again."
 
-def _is_content_policy_error(e: Exception) -> bool:
-    """Checks if an exception message indicates a content policy violation."""
-    error_message = str(e).lower()
-    keywords = [
-        "content filter", 
-        "content management policy", 
-        "responsible ai", 
-        "safety policy",
-        "prompt blocked" # Common for Azure
-    ]
-    return any(keyword in error_message for keyword in keywords)
 
 # Fetch Azure credentials from environment variables (loaded by core.py)
 api_key = os.getenv("AZURE_OPENAI_API_KEY")
@@ -49,12 +38,55 @@ openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01")
 
 logger = logging.getLogger(__name__) 
 
+
 class GraphState(TypedDict):
-    embeddings: Union[None, LangchainEmbeddings] 
+    """
+    Typed dictionary representing the mutable state that flows through the
+    LangGraph agent.
+
+    Attributes
+    ----------
+    embeddings : Optional[LangchainEmbeddings]
+        Embeddings model instance. ``None`` until instantiated.
+    vectorstore_path : str
+        Path to the FAISS vector‑store directory on disk.
+    vectorstore : Optional[FAISS]
+        Loaded FAISS vector store. ``None`` until loaded.
+    llm_large : Optional[AzureChatOpenAI]
+        Large language model used for query generation and synthesis.
+    retriever : Optional[VectorStoreRetriever]
+        Retriever built from the FAISS vector store.
+    allowed_files : Optional[List[str]]
+        Filenames selected by the user for the current question.
+    question : Optional[str]
+        The user’s current question.
+    documents_by_file : Optional[Dict[str, List[Document]]]
+        Mapping of filenames to the list of retrieved document chunks.
+    individual_answers : Optional[Dict[str, str]]
+        Answers generated for each file individually.
+    n_alternatives : Optional[int]
+        Number of alternative queries to generate per question.
+    k_per_query : Optional[int]
+        Chunks to retrieve per alternative query.
+    generation : Optional[str]
+        Final synthesized answer.
+    conversation_history : Optional[List[Dict[str, str]]]
+        List of previous conversation turns.
+    bypass_individual_generation : Optional[bool]
+        Whether to skip individual‑file answer generation.
+    raw_documents_for_synthesis : Optional[str]
+        Raw document text formatted for the synthesizer.
+    k_chunks_retriever : int
+        Total chunks to retrieve for the base retriever.
+    combine_threshold : int
+        Maximum number of individual answers that may be combined in a
+        single batch before hierarchical combining is used.
+    """
+    embeddings: Optional[LangchainEmbeddings] 
     vectorstore_path: str 
-    vectorstore: Union[None, FAISS]
-    llm_large: Union[None, AzureChatOpenAI] 
-    retriever: Union[None, VectorStoreRetriever] 
+    vectorstore: Optional[FAISS]
+    llm_large: Optional[AzureChatOpenAI] 
+    retriever: Optional[VectorStoreRetriever] 
     allowed_files: Optional[List[str]] 
     question: Optional[str] 
     documents_by_file: Optional[Dict[str, List[Document]]] 
@@ -69,7 +101,56 @@ class GraphState(TypedDict):
     combine_threshold: int
 
 
+def _is_content_policy_error(e: Exception) -> bool:
+    """
+    Determine whether an exception message indicates an AI content‑policy
+    violation.
+
+    Parameters
+    ----------
+    e : Exception
+        Exception raised by the LLM provider.
+
+    Returns
+    -------
+    bool
+        ``True`` if the exception message contains any keyword that signals
+        a policy‑related block; otherwise ``False``.
+    """
+    error_message = str(e).lower()
+    keywords = [
+        "content filter", 
+        "content management policy", 
+        "responsible ai", 
+        "safety policy",
+        "prompt blocked" # Common for Azure
+    ]
+    return any(keyword in error_message for keyword in keywords)
+
+
 def instantiate_embeddings(state: GraphState) -> GraphState:
+    """
+    Instantiate and attach an Azure OpenAI embeddings model to the graph
+    state.
+
+    The function checks whether an embeddings model already exists in
+    ``state``. If absent, it creates a new
+    :class:`langchain_openai.AzureOpenAIEmbeddings` instance using the Azure
+    configuration provided by module‑level environment variables.  Any
+    exception during instantiation is logged and the ``embeddings`` field is
+    set to ``None``.
+
+    Parameters
+    ----------
+    state : GraphState
+        Current state dictionary flowing through the LangGraph agent.
+
+    Returns
+    -------
+    GraphState
+        Updated state containing the embeddings model (or ``None`` on
+        failure).
+    """
     t_node_start = time.perf_counter()
     node_name = "instantiate_embeddings_node"
     logging.info(f"--- Starting Node: {node_name} ---")
@@ -90,7 +171,30 @@ def instantiate_embeddings(state: GraphState) -> GraphState:
     logging.info(f"--- Node: {node_name} finished in {duration_node:.4f} seconds ---")
     return state
 
+
 def instantiate_llm_large(state: GraphState) -> GraphState:
+    """
+    Instantiate and attach a large Azure OpenAI chat model to the graph
+    state for query generation.
+
+    The function first checks whether an LLM instance already exists in
+    ``state``. If it does not, a new
+    :class:`langchain_openai.AzureChatOpenAI` model is created using the
+    deployment, endpoint, API key, and version specified by the
+    module‑level Azure configuration variables. On any exception, the error
+    is logged and the ``llm_large`` field is set to ``None``.
+
+    Parameters
+    ----------
+    state : GraphState
+        Current state dictionary flowing through the LangGraph agent.
+
+    Returns
+    -------
+    GraphState
+        Updated state containing the large LLM instance (or ``None`` if
+        instantiation failed).
+    """
     t_node_start = time.perf_counter()
     node_name = "instantiate_llm_node"
     logging.info(f"--- Starting Node: {node_name} (for query generation) ---")
@@ -111,7 +215,31 @@ def instantiate_llm_large(state: GraphState) -> GraphState:
     logging.info(f"--- Node: {node_name} finished in {duration_node:.4f} seconds ---")
     return state
 
+
 def load_faiss_vectorstore(state: GraphState) -> GraphState:
+    """
+    Load a local FAISS vector store from the path stored in ``state`` and
+    attach it to the graph state.
+
+    The function validates that a vector‑store path exists, an embeddings
+    model has been instantiated, and the target directory is present on
+    disk. If any check fails or loading raises an exception, the
+    ``vectorstore`` field in the returned state is set to ``None`` and the
+    error is logged.  When loading succeeds, the resulting
+    :class:`langchain_community.vectorstores.FAISS` instance is saved back
+    into the state under the ``vectorstore`` key.
+
+    Parameters
+    ----------
+    state : GraphState
+        Current mutable graph state flowing through the LangGraph agent.
+
+    Returns
+    -------
+    GraphState
+        Updated state whose ``vectorstore`` key holds the loaded FAISS
+        instance, or ``None`` if loading failed.
+    """
     t_node_start = time.perf_counter()
     node_name = "load_vectorstore_node"
     logging.info(f"--- Starting Node: {node_name} ---")
@@ -139,7 +267,33 @@ def load_faiss_vectorstore(state: GraphState) -> GraphState:
     logging.info(f"--- Node: {node_name} finished in {duration_node:.4f} seconds ---")
     return state
 
+
 def instantiate_retriever(state: GraphState) -> GraphState:
+    """
+    Instantiate and attach a base retriever built from the loaded FAISS
+    vector store.
+
+    The function checks that a FAISS vector store is present in ``state``.
+    If available, it constructs a
+    :class:`langchain_core.vectorstores.VectorStoreRetriever` using the
+    ``k`` value stored in ``state['k_chunks_retriever']`` (falling back to
+    the module‑level default).  On success the new retriever is written back
+    to ``state`` under the ``retriever`` key.  If the vector store is
+    missing or instantiation fails, the key is set to ``None`` and the error
+    is logged.
+
+    Parameters
+    ----------
+    state : GraphState
+        Current mutable graph state flowing through the LangGraph agent.
+
+    Returns
+    -------
+    GraphState
+        Updated state whose ``retriever`` key holds the instantiated
+        :class:`langchain_core.vectorstores.VectorStoreRetriever`, or
+        ``None`` if creation was unsuccessful.
+    """
     t_node_start = time.perf_counter()
     node_name = "instantiate_retriever_node"
     logging.info(f"--- Starting Node: {node_name} ---")
@@ -160,10 +314,37 @@ def instantiate_retriever(state: GraphState) -> GraphState:
     logging.info(f"--- Node: {node_name} finished in {duration_node:.4f} seconds ---")
     return state
 
+
 async def _async_retrieve_docs_with_embeddings_for_file(
     vectorstore: FAISS, file_name: str, query_embeddings_list: List[List[float]],
     query_list_texts: List[str], k_per_query: int
 ) -> tuple[str, Optional[List[Document]]]:
+    """
+    Retrieve document chunks for a single file using pre‑computed query
+    embeddings and return a unique list of results.
+
+    Parameters
+    ----------
+    vectorstore : FAISS
+        Loaded FAISS vector store containing all indexed document chunks.
+    file_name : str
+        Name of the file (as stored in document metadata) whose passages
+        should be retrieved.
+    query_embeddings_list : List[List[float]]
+        Pre‑computed embedding vectors corresponding to each query variant.
+    query_list_texts : List[str]
+        Textual form of the queries (parallel to
+        ``query_embeddings_list``). Used only for logging.
+    k_per_query : int
+        Number of document chunks to retrieve per query embedding.
+
+    Returns
+    -------
+    tuple[str, Optional[List[Document]]]
+        Two‑element tuple ``(file_name, docs)`` where ``docs`` is a list of
+        unique :class:`langchain_core.documents.Document` instances on
+        success, or ``None`` if retrieval fails.
+    """
     logging.info(f"Retrieving for file: {file_name} using {len(query_embeddings_list)} pre-computed query embeddings.")
     retrieved_docs: List[Document] = []
     try:
@@ -183,7 +364,41 @@ async def _async_retrieve_docs_with_embeddings_for_file(
         logging.exception(f"[{file_name}] Error during similarity search by vector: {e_retrieve}")
         return file_name, None
 
+
 async def extract_documents_parallel_node(state: GraphState) -> GraphState:
+    """
+    Extract relevant document chunks in parallel for each user‑selected file.
+
+    The node performs the following steps:
+
+    1. Generate alternative queries for the user’s question with a large
+       language model (via :pyclass:`langchain.retrievers.MultiQueryRetriever`)
+       up to ``n_alternatives`` variants.
+    2. Embed each query using the embeddings model stored in ``state``.
+    3. For every file in ``state['allowed_files']`` retrieve the top
+       ``k_per_query`` chunks per query embedding from the FAISS vector
+       store with an asynchronous similarity search.
+    4. Deduplicate retrieved chunks per file.
+    5. Store the resulting mapping in ``state['documents_by_file']``.
+
+    If any required component (question, allowed files, vector store,
+    embeddings, retriever, or LLM) is missing, the function returns early
+    with an empty ``documents_by_file`` dictionary.
+
+    Parameters
+    ----------
+    state : GraphState
+        Current mutable graph state. Expected to contain the keys
+        ``question``, ``llm_large``, ``retriever``, ``vectorstore``,
+        ``embeddings``, and ``allowed_files``.
+
+    Returns
+    -------
+    GraphState
+        Updated state where ``documents_by_file`` maps each allowed filename
+        to a list of retrieved :class:`langchain_core.documents.Document`
+        instances (or an empty list on failure).
+    """
     t_node_start = time.perf_counter()
     node_name = "extract_documents_node"
     logging.info(f"--- Starting Node: {node_name} (Async) ---")
@@ -242,7 +457,44 @@ async def extract_documents_parallel_node(state: GraphState) -> GraphState:
     logging.info(f"--- Node: {node_name} finished in {duration_node:.4f} seconds ---")
     return {**state, "documents_by_file": current_documents_by_file}
 
+
 async def generate_individual_answers_node(state: GraphState) -> GraphState:
+    """
+    Generate detailed answers for each user‑selected file in parallel.
+
+    The node iterates over the filenames in ``state['allowed_files']`` and
+    produces an answer per file using only the document chunks previously
+    extracted for that file (``state['documents_by_file']``).  For every
+    file it constructs a prompt that:
+
+    * Presents the file‑specific context chunks.
+    * Asks the large language model (LLM) to answer the user’s question
+      **solely** from that context.
+    * Requires inline citations in the form
+      ``"quoted text…" (filename, Page X)``.
+
+    Answers are generated asynchronously to improve latency.  If a file has
+    no retrieved chunks, a default “no relevant information” message is
+    stored.  Content‑policy violations or other LLM errors are caught and
+    logged; the corresponding answer is set to a predefined policy message
+    or a generic error explanation.
+
+    The resulting mapping is written back to
+    ``state['individual_answers']``.  The existing synthesized answer in
+    ``state['generation']`` is preserved for downstream nodes.
+
+    Parameters
+    ----------
+    state : GraphState
+        Current mutable graph state.  Expected keys include
+        ``question``, ``allowed_files``, and ``documents_by_file``.
+
+    Returns
+    -------
+    GraphState
+        Updated state where ``individual_answers`` maps each allowed
+        filename to its generated answer (or a placeholder string).
+    """
     t_node_start = time.perf_counter()
     node_name = "generate_answers_node"
     logging.info(f"--- Starting Node: {node_name} (Async) ---")
@@ -303,7 +555,46 @@ Detailed Answer (with citations like "quote..." ({filename}, Page X)):"""
     logging.info(f"--- Node: {node_name} finished in {duration_node:.4f} seconds ---")
     return state_to_return
 
+
 def format_raw_documents_for_synthesis_node(state: GraphState) -> GraphState:
+    """
+    Format retrieved document chunks into a single raw‑text block for
+    downstream answer synthesis.
+
+    The node iterates over the `state['allowed_files']` list and, for each
+    file, concatenates the page‑level text stored in
+    `state['documents_by_file']` into a structured plain‑text section:
+
+    ```
+    --- Start of Context from File: <filename> ---
+
+    Page X:
+    <page content>
+
+    ---
+    ```
+
+    The assembled text for *all* files is saved under the
+    ``raw_documents_for_synthesis`` key so that the synthesis LLM can
+    answer the user’s question when individual‑file generation is
+    bypassed.
+
+    If no documents were retrieved for the selected files, or if no files
+    were selected, the function writes an explanatory placeholder string
+    instead.
+
+    Parameters
+    ----------
+    state : GraphState
+        Current mutable LangGraph state. Expected keys include
+        ``documents_by_file`` and ``allowed_files``.
+
+    Returns
+    -------
+    GraphState
+        Updated state with ``raw_documents_for_synthesis`` containing the
+        formatted context text or a descriptive placeholder.
+    """
     t_node_start = time.perf_counter()
     node_name = "format_raw_documents_for_synthesis_node"
     logging.info(f"--- Starting Node: {node_name} ---")
@@ -330,15 +621,95 @@ def format_raw_documents_for_synthesis_node(state: GraphState) -> GraphState:
     logging.info(f"--- Node: {node_name} finished in {duration_node:.4f} seconds ---")
     return {**state, "raw_documents_for_synthesis": formatted_raw_docs.strip()}
 
-def _format_conversation_history(history: Optional[List[Dict[str, str]]]) -> str:
-    if not history: return "No previous conversation history."
-    return "\n\n".join([f"User: {t.get('user_question', 'N/A')}\nAssistant: {t.get('assistant_response', 'N/A')}" for t in history])
+
+def _format_conversation_history(
+    history: Optional[List[Dict[str, str]]]
+) -> str:
+    """
+    Format the prior conversation turns into a readable multi‑line string.
+
+    Each turn is rendered as two lines—one for the user question and one
+    for the assistant response—separated by a blank line between turns. If
+    *history* is ``None`` or empty, a placeholder message is returned
+    instead.
+
+    Parameters
+    ----------
+    history : Optional[List[Dict[str, str]]]
+        Conversation history where each element is a dictionary containing
+        the keys ``'user_question'`` and ``'assistant_response'``.
+
+    Returns
+    -------
+    str
+        Formatted conversation history or a message indicating that no
+        previous history is available.
+    """
+    if not history:
+        return "No previous conversation history."
+
+    return "\n\n".join(
+        [
+            (
+                f"User: {t.get('user_question', 'N/A')}\n"
+                f"Assistant: {t.get('assistant_response', 'N/A')}"
+            )
+            for t in history
+        ]
+    )
+
 
 async def _async_combine_answer_chunk(
     question: str, answer_chunk_input: Union[Dict[str, str], str], llm_combiner: BaseLanguageModel,
     combination_prompt_template: PromptTemplate, chunk_name: str, conversation_history_str: str,
     is_raw_chunk: bool
 ) -> str:
+    """
+    Combine a single group of answers or raw‑text chunks into an
+    intermediate synthesized result using an LLM.
+
+    The coroutine formats *answer_chunk_input* according to
+    *combination_prompt_template* and invokes *llm_combiner* to produce a
+    unified chunk of text. It supports two modes:
+
+    * **Processed‑answers mode** (`is_raw_chunk=False`) – *answer_chunk_input*
+      is a mapping from filename to the answer previously generated for
+      that file.
+    * **Raw‑chunk mode** (`is_raw_chunk=True`) – *answer_chunk_input* is the
+      raw text extracted from documents, already concatenated for prompt
+      injection.
+
+    If any sub‑answer equals the global ``CONTENT_POLICY_MESSAGE`` the
+    function short‑circuits and returns that message unchanged. Exceptions
+    raised during LLM invocation are caught; policy violations return
+    ``CONTENT_POLICY_MESSAGE`` while other errors yield a descriptive
+    string.
+
+    Parameters
+    ----------
+    question : str
+        The user’s current question.
+    answer_chunk_input : Union[Dict[str, str], str]
+        Answers dictionary (processed mode) or raw text block (raw‑chunk
+        mode).
+    llm_combiner : BaseLanguageModel
+        Language model used to perform the combination.
+    combination_prompt_template : PromptTemplate
+        Prompt template that wraps the chunk content before LLM invocation.
+    chunk_name : str
+        Human‑readable identifier for logging.
+    conversation_history_str : str
+        Pre‑formatted conversation history passed to the prompt.
+    is_raw_chunk : bool
+        ``True`` if *answer_chunk_input* is raw text, ``False`` if it is a
+        processed answers mapping.
+
+    Returns
+    -------
+    str
+        Synthesized answer chunk, the policy‑violation message, or an error
+        description.
+    """
     logging.info(f"Combining answer chunk: {chunk_name} (is_raw_chunk: {is_raw_chunk}).")
     formatted_chunk_content_for_prompt: str
     if is_raw_chunk and isinstance(answer_chunk_input, str):
@@ -373,6 +744,42 @@ async def _async_combine_answer_chunk(
 
 
 async def combine_answers_node(state: GraphState) -> GraphState:
+    """
+    Synthesize a final answer for the user by combining individual file‑
+    based answers or raw document text.
+
+    The node supports two workflows controlled by
+    ``state['bypass_individual_generation']``:
+
+    * **Standard mode** (`bypass_individual_generation=False`) – Combine the
+      pre‑processed answers stored in ``state['individual_answers']``.
+    * **Bypass mode** (`bypass_individual_generation=True`) – Skip individual
+      answers and instead combine the raw document text assembled in
+      ``state['raw_documents_for_synthesis']``.
+
+    The function performs hierarchical combination when the number of
+    answers exceeds ``state['combine_threshold']`` by chunking the inputs
+    and calling :pyfunc:`_async_combine_answer_chunk` asynchronously,
+    followed by a final synthesis step. Content‑policy violations are
+    propagated using the global :data:`CONTENT_POLICY_MESSAGE`.
+
+    Error and “no‑info” conditions are tracked per file and injected back
+    into the final prompt so that the LLM can acknowledge gaps or issues.
+
+    Parameters
+    ----------
+    state : GraphState
+        Current mutable graph state containing (among others) the keys
+        ``question``, ``allowed_files``, ``individual_answers``,
+        ``raw_documents_for_synthesis``, ``combine_threshold``, and
+        ``conversation_history``.
+
+    Returns
+    -------
+    GraphState
+        Updated state where ``generation`` holds the synthesized answer,
+        a content‑policy message, or an error explanation.
+    """
     t_node_start = time.perf_counter()
     node_name = "combine_answers_node"
     logging.info(f"--- Starting Node: {node_name} (Async) ---")
@@ -438,7 +845,7 @@ Synthesized Answer from RAW Docs:"""
                     else: ans_to_combine[fname] = ans
                 
                 if not ans_to_combine: # All answers were errors or no_info or policy
-                    if any(CONTENT_POLICY_MESSAGE in individual_answers.values()):
+                    if any(CONTENT_POLICY_MESSAGE in ans for ans in individual_answers.values()):
                          output_generation = CONTENT_POLICY_MESSAGE
                     else:
                         msg_parts = [f"I couldn't find specific information to answer: '{question}'."]
@@ -498,7 +905,39 @@ Synthesized Answer from RAW Docs:"""
     logging.info(f"--- Node: {node_name} finished in {duration_node:.4f} seconds ---")
     return state_to_return
 
+
 def decide_processing_path_after_extraction(state: GraphState) -> str:
+    """
+    Decide which processing path should follow document extraction.
+
+    The choice depends on three pieces of information stored in *state*:
+
+    * ``question`` – the user’s current question.
+    * ``allowed_files`` – the list of filenames selected by the user.
+    * ``bypass_individual_generation`` – ``True`` when individual‑file
+      answer generation should be skipped.
+
+    Routing logic
+    -------------
+    * If either *question* or *allowed_files* is missing, route to
+      ``"to_generate_individual_answers"`` so the UI can prompt the user.
+    * If *bypass_individual_generation* is ``True``, route to
+      ``"to_format_raw_for_synthesis"`` to format raw text for a single
+      synthesis pass.
+    * Otherwise, route to ``"to_generate_individual_answers"`` to create
+      answers for each file separately.
+
+    Parameters
+    ----------
+    state : GraphState
+        Current mutable graph state produced by
+        :pyfunc:`extract_documents_parallel_node`.
+
+    Returns
+    -------
+    str
+        Workflow edge label that indicates the next node to execute.
+    """
     node_name = "decide_processing_path_after_extraction"
     bypass = state.get("bypass_individual_generation", False)
     question = state.get("question")
@@ -515,7 +954,27 @@ def decide_processing_path_after_extraction(state: GraphState) -> str:
         return "to_generate_individual_answers"
 
 
-def create_graph_app():
+def create_graph_app() -> Graph:
+    """
+    Build and compile the LangGraph workflow for the KnowAI agent.
+
+    The workflow wires together the individual LangGraph nodes that
+    perform each stage of the question‑answer pipeline:
+
+    1. Instantiate embeddings, LLM, vector store, and retriever.
+    2. Extract document chunks relevant to the user’s question.
+    3. Optionally format raw documents or generate per‑file answers.
+    4. Combine answers (or raw text) into a final synthesized response.
+
+    Conditional routing after document extraction is decided by
+    :pyfunc:`decide_processing_path_after_extraction`.
+
+    Returns
+    -------
+    Graph
+        A compiled, ready‑to‑run LangGraph representing the complete agent
+        workflow.
+    """
     workflow = StateGraph(GraphState)
     workflow.add_node("instantiate_embeddings_node", instantiate_embeddings)
     workflow.add_node("instantiate_llm_node", instantiate_llm_large)
