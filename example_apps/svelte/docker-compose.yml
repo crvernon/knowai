@@ -1,0 +1,23 @@
+services:
+  knowai:
+    # Path to the Dockerfile you showed earlier
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    environment:
+      KNOWAI_VERSION: latest
+    ports:
+      - "8000:8000"
+
+  ui:
+    # If the Svelte project lives *in this same folder*
+    build: .
+    # …or, if it’s in a sub-folder called svelte-example:
+    # build: ./svelte-example
+    depends_on:
+      - knowai
+    ports:
+      - "5173:5173"
+    environment:
+      # Let the front-end talk to the API via Docker’s service name
+      VITE_KNOWAI_API: http://knowai:8000
