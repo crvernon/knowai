@@ -6,7 +6,7 @@
 ### Set up
 - Clone this repostiory into a local directory of your choosing
 - Build a virtual environment 
-- Install `knowai` by running:  `pip install knowai` from the root directory of your clone
+- Install `knowai` by running:  `pip install .` from the root directory of your clone
 - Configure a `.env` file with the following:
     - `AZURE_OPENAI_API_KEY` - Your API key
     - `AZURE_OPENAI_ENDPOINT` - Your Azure endpoint
