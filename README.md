@@ -80,3 +80,78 @@ answers or the combined response in the main panel.
 For advanced configuration options (e.g., conversation history length,
 retriever *k* values, or combine thresholds) see the docstrings in
 `knowai/core.py` and `knowai/agent.py`.
+
+## Containerization
+
+To build and run both the knowai service and the Svelte UI using Docker Compose:
+
+1. Ensure Docker and Docker Compose are installed on your machine.
+2. From the directory containing this README (the repo root), navigate to the Svelte example folder:
+   ```bash
+   cd example_apps/svelte
+   ```
+3. Start the services and build images:
+   ```bash
+   docker compose up --build
+   ```
+   This will:
+   - Build the `knowai` service (listening on port 8000).
+   - Build the `ui` service (Svelte app, listening on port 5173).
+4. Open your browser and visit:
+   - FastAPI docs: http://localhost:8000/docs
+   - Svelte UI:      http://localhost:5173
+5. To stop and remove containers, press `CTRL+C` and then run:
+   ```bash
+   docker compose down
+   ```
+
+## Running the knowai CLI Locally
+
+You can start the FastAPI micro-service locally without Docker and point it to either a local vectorstore or one hosted on S3.
+
+### Using a Local Vectorstore
+
+1. Ensure you have a built FAISS vectorstore on disk (e.g., `test_faiss_store`).
+2. Start the service:
+   ```bash
+   python -m knowai.cli
+   ```
+3. In another terminal, initialize the session:
+   ```bash
+   curl -X POST http://127.0.0.1:8000/initialize \
+     -H "Content-Type: application/json" \
+     -d '{"vectorstore_s3_uri":"/absolute/path/to/your/vectorstore"}'
+   ```
+4. Ask a question:
+   ```bash
+   curl -X POST http://127.0.0.1:8000/ask \
+     -H "Content-Type: application/json" \
+     -d '{
+       "session_id":"<session_id>",
+       "question":"Your question here",
+       "selected_files":["file1.pdf","file2.pdf"]
+     }'
+   ```
+
+### Using an S3-Hosted Vectorstore
+
+1. Start the service:
+   ```bash
+   python -m knowai.cli
+   ```
+2. Initialize the session against your S3 bucket:
+   ```bash
+   curl -X POST http://127.0.0.1:8000/initialize \
+     -H "Content-Type: application/json" \
+     -d '{"vectorstore_s3_uri":"s3://your-bucket/path"}'
+   ```
+3. Ask a question in a similar way:
+   ```bash
+   curl -X POST http://127.0.0.1:8000/ask \
+     -H "Content-Type: application/json" \
+     -d '{
+       "session_id":"<session_id>",
+       "question":"Another question example",
+       "selected_files":[]
+     }'
+   ```
