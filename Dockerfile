@@ -1,5 +1,3 @@
-
-
 # ------------------------------------------------------------------------------
 # knowai: Container image
 # ------------------------------------------------------------------------------
@@ -33,36 +31,26 @@ ARG KNOWAI_VERSION=latest
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=on \
-    # Streamlit binds to 0.0.0.0 automatically when this is set
-    STREAMLIT_SERVER_HEADLESS=true
+    PIP_NO_CACHE_DIR=on
 
 WORKDIR /app
 
 # --------------------------------------------------------------------------- #
-# Install knowai and optional extras
+# Copy source and install dependencies
 # --------------------------------------------------------------------------- #
+COPY . /app
+
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip && \
-    if [ "${KNOWAI_VERSION}" = "latest" ]; then \
-        pip install knowai streamlit; \
-    else \
-        pip install "knowai==${KNOWAI_VERSION}" streamlit; \
-    fi
+    pip install fastapi "uvicorn[standard]" boto3 && \
+    # install the local knowai package from source
+    pip install .
 
-# --------------------------------------------------------------------------- #
-# Copy example Streamlit app (optional)
-# --------------------------------------------------------------------------- #
-# If the repo includes the UI file, copy it so the default CMD works out‑of‑box.
-# Fall back to an internal knowai demo if the file is missing at build time.
-COPY --chmod=644 app_chat_simple.py* /app/ 2>/dev/null || true
-
-EXPOSE 8501
-
+# Expose FastAPI/uvicorn port
+EXPOSE 8000
 # --------------------------------------------------------------------------- #
 # Entrypoint / default command
 # --------------------------------------------------------------------------- #
 # By default, launch the Streamlit chat UI.  Override CMD at `docker run`
 # to execute other entrypoints (e.g., `python -m knowai.cli …`).
-ENTRYPOINT ["/bin/bash", "-c"]
-CMD ["streamlit", "run", "app_chat_simple.py", "--server.port", "8501"]
+ENTRYPOINT ["python", "-m", "knowai.cli"]
