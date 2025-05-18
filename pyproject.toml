@@ -11,7 +11,7 @@ authors = [
 ]
 description = "A conversational RAG agent pipeline using LangGraph"
 readme = "README.md"
-requires-python = ">=3.13.3" # Adjusted based on PyMuPDF and asyncio features
+requires-python = ">=3.13" # Adjusted based on PyMuPDF and asyncio features
 maintainers = [
     {name = "Chris Vernon", email = "chris.vernon@pnnl.gov"},
 ]
