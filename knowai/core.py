@@ -20,8 +20,42 @@ logger = logging.getLogger(__name__)
 
 class KnowAIAgent:
     """
-    A conversational agent that uses a LangGraph-based RAG pipeline.
-    Manages session state and provides a method to process conversational turns.
+    Conversational Retrieval‑Augmented Generation (RAG) agent built on a
+    LangGraph workflow.
+
+    The agent owns a compiled LangGraph *graph_app* and a mutable
+    ``session_state`` that flows through the graph.  It exposes
+    :pyfunc:`process_turn`, which takes the user’s question plus optional
+    UI parameters, executes the LangGraph asynchronously, updates
+    conversation history, and returns structured results for display.
+
+    Parameters
+    ----------
+    vectorstore_path : str
+        Path on disk to the FAISS vector‑store directory.
+    combine_threshold : int, default ``COMBINE_THRESHOLD_DEFAULT``
+        Maximum number of individual answers to combine in a single pass
+        before hierarchical chunking is used.
+    max_conversation_turns : int, default ``MAX_CONVERSATION_TURNS_DEFAULT``
+        Number of past turns to retain in ``session_state``.
+    k_chunks_retriever : int, default ``K_CHUNKS_RETRIEVER_DEFAULT``
+        Top‑*k* chunks returned by the base retriever when no re‑ranking
+        is applied.
+    env_file_path : Optional[str], default ``None``
+        Explicit path to a *.env* file containing Azure/OpenAI settings.
+        If ``None``, the constructor attempts auto‑detection.
+    initial_state_overrides : Optional[Dict[str, Any]], default ``None``
+        Mapping of ``GraphState`` keys to override their default initial
+        values.  Unknown keys are ignored with a warning.
+
+    Attributes
+    ----------
+    graph_app : langgraph.Graph
+        Compiled LangGraph responsible for end‑to‑end RAG processing.
+    session_state : GraphState
+        Mutable state object passed into each LangGraph invocation.
+    max_conversation_turns : int
+        Maximum number of turns stored in ``conversation_history``.
     """
     def __init__(
         self,
@@ -31,7 +65,7 @@ class KnowAIAgent:
         k_chunks_retriever: int = K_CHUNKS_RETRIEVER_DEFAULT,
         env_file_path: Optional[str] = None, 
         initial_state_overrides: Optional[Dict[str, Any]] = None
-    ):
+    ) -> None:
         if env_file_path and os.path.exists(env_file_path):
             load_dotenv(dotenv_path=env_file_path)
             logging.info(f"Loaded environment variables from: {env_file_path}")
