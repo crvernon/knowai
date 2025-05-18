@@ -3,6 +3,9 @@ test_faiss_store/
 wmp_faiss_text-embedding-3-large/
 vectorstores/
 
+# examples
+example_apps/svelte/svelte-example/
+
 # pyenv
 .python-version
 
