@@ -6,7 +6,7 @@
 ### Set up
 - Clone this repostiory into a local directory of your choosing
 - Build a virtual environment 
-- Install `knowai` by running:  `pip install .` from the root directory of your clone
+- Install `knowai` by running:  `pip install .` from the root directory of your clone (OR) install using `pip install knowai` from PyPI.
 - Configure a `.env` file with the following:
     - `AZURE_OPENAI_API_KEY` - Your API key
     - `AZURE_OPENAI_ENDPOINT` - Your Azure endpoint
@@ -89,6 +89,12 @@ To build and run both the knowai service and the Svelte UI using Docker Compose:
 2. From the directory containing this README (the repo root), navigate to the Svelte example folder:
    ```bash
    cd example_apps/svelte
+   ```
+2a. Compile the Svelte app and package the build as `svelte-example`:
+   ```bash
+   npm install
+   npm run build
+   mv dist svelte-example
    ```
 3. Start the services and build images:
    ```bash
