@@ -1,4 +1,6 @@
 [![test](https://github.com/crvernon/knowai/actions/workflows/build.yml/badge.svg)](https://github.com/crvernon/knowai/actions/workflows/build.yml)
+[![DOI](https://zenodo.org/badge/976158351.svg)](https://doi.org/10.5281/zenodo.15460377)
+
 
 ## knowai
 #### An agentic AI pipeline for multiple, large PDF reports interrogation
