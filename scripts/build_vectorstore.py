@@ -12,8 +12,9 @@ from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 from langchain_openai import AzureOpenAIEmbeddings
 
-# Load Azure credentials from environment
-load_dotenv()
+# Load credentials; make sure dotenv overwrites any system variable settings
+load_dotenv(override=True)
+
 api_key = os.getenv("AZURE_OPENAI_API_KEY")
 azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
 embeddings_deployment = os.getenv("AZURE_EMBEDDINGS_DEPLOYMENT", "text-embedding-3-large")
@@ -50,8 +51,12 @@ def get_retriever_from_directory(
     # Load or initialize vectorstore
     if persist and os.path.exists(persist_directory):
         try:
-            vectorstore = FAISS.load_local(persist_directory, embeddings)
-            logger.info(f"Loaded existing FAISS store from {persist_directory}")
+            vectorstore = FAISS.load_local(
+                persist_directory,
+                embeddings,
+                allow_dangerous_deserialization=True
+            )
+            logger.info(f"Loaded existing FAISS store from {persist_directory} with dangerous deserialization allowed")
         except Exception as e:
             logger.error(f"Error loading existing FAISS store: {e}")
             vectorstore = None

@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "knowai"
+version = "0.1.0"
+license = {file = "LICENSE"}
+authors = [
+  { name="Chris R. Vernon", email="chris.vernon@pnnl.gov" },
+]
+description = "A conversational RAG agent pipeline using LangGraph"
+readme = "README.md"
+requires-python = ">=3.13" # Adjusted based on PyMuPDF and asyncio features
+maintainers = [
+    {name = "Chris Vernon", email = "chris.vernon@pnnl.gov"},
+]
+classifiers = [
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "langchain>=0.3.23",
+    "langchain-core>=0.3.55",
+    "langchain-community>=0.3.21",
+    "langchain-openai>=0.3.14",
+    "langgraph>=0.3.31",
+    "python-dotenv>=1.1.0",
+    "PyMuPDF>=1.25.5", # fitz
+    "faiss-cpu>=1.10.0",
+    "tiktoken>=0.5.0",
+    "streamlit>=0.9.0",
+    "fastapi>=0.115.9",
+    "pydantic>=2.11.3",
+    "boto3>=1.38.18",
+    "uvicorn>=0.34.2", 
+    
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-cov>=2.12.1",
+    "trio>=0.30.0",
+]
+docs = [
+    "setuptools>=57.0.0",
+    "build>=0.5.1",
+    "ipykernel>=6.15.1",
+    "autodoc>=0.5.0",
+    "nbsphinx~=0.8.6",
+    "sphinx~=7.2.6",
+]
+deploy = [
+    "twine>=4.0.1",
+]
+
+[project.urls]
+Repository = "https://github.com/crvernon/knowai"
+
+[tool.hatch.build]
+packages = ["knowai"]  # set importable package name to "cerf"
+include = ["knowai"]
