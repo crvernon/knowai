@@ -1,34 +1,58 @@
 [build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "knowai"
 version = "0.1.0"
+license = {file = "LICENSE"}
 authors = [
   { name="Chris R. Vernon", email="chris.vernon@pnnl.gov" },
 ]
-description = "A conversational RAG agent using LangGraph"
+description = "A conversational RAG agent pipeline using LangGraph"
 readme = "README.md"
-requires-python = ">=3.13" # Adjusted based on PyMuPDF and asyncio features
+requires-python = ">=3.13.3" # Adjusted based on PyMuPDF and asyncio features
+maintainers = [
+    {name = "Chris Vernon", email = "chris.vernon@pnnl.gov"},
+]
 classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License", # Or your chosen license
+    "Programming Language :: Python :: 3.13",
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "langchain>=0.1.0,<0.2.0", # Specify your langchain version range
-    "langchain-community>=0.0.20,<0.1.0",
-    "langchain-openai>=0.1.0,<0.2.0",
-    "langgraph>=0.0.30,<0.1.0",
-    "python-dotenv>=1.0.0",
-    "PyMuPDF>=1.23.0", # fitz
-    "faiss-cpu>=1.7.0", # Or faiss-gpu if applicable
-    "openai>=1.0.0", # For AzureOpenAIEmbeddings, AzureChatOpenAI
-    "httpx>=0.24.0", # Often a dependency of openai or langchain
+    "langchain>=0.3.23",
+    "langchain-core>=0.3.55",
+    "langchain-community>=0.3.21",
+    "langchain-openai>=0.3.14",
+    "langgraph>=0.3.31",
+    "python-dotenv>=1.1.0",
+    "PyMuPDF>=1.25.5", # fitz
+    "faiss-cpu>=1.10.0",
     "tiktoken>=0.5.0",
+    "streamlit>=0.9.0"
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=6.0",
+    "pytest-cov>=2.12.1",
+    "trio>=0.30.0",
+]
+docs = [
+    "setuptools>=57.0.0",
+    "build>=0.5.1",
+    "ipykernel>=6.15.1",
+    "autodoc>=0.5.0",
+    "nbsphinx~=0.8.6",
+    "sphinx~=7.2.6",
+]
+deploy = [
+    "twine>=4.0.1",
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/yourusername/knowai" # Optional
-"Bug Tracker" = "https://github.com/yourusername/knowai/issues" # Optional
+Repository = "https://github.com/crvernon/knowai"
+
+[tool.hatch.build]
+packages = ["knowai"]  # set importable package name to "cerf"
+include = ["knowai"]
