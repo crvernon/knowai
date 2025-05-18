@@ -32,6 +32,9 @@ dependencies = [
     "streamlit>=0.9.0",
     "fastapi>=0.115.9",
     "pydantic>=2.11.3",
+    "boto3>=1.38.18",
+    "uvicorn>=0.34.2", 
+    
 ]
 
 [project.optional-dependencies]
@@ -50,9 +53,6 @@ docs = [
 ]
 deploy = [
     "twine>=4.0.1",
-]
-aws = [
-    "boto>=2.49"
 ]
 
 [project.urls]
