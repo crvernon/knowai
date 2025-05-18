@@ -29,11 +29,13 @@ dependencies = [
     "PyMuPDF>=1.25.5", # fitz
     "faiss-cpu>=1.10.0",
     "tiktoken>=0.5.0",
-    "streamlit>=0.9.0"
+    "streamlit>=0.9.0",
+    "fastapi>=0.115.9",
+    "pydantic>=2.11.3",
 ]
 
 [project.optional-dependencies]
-test = [
+dev = [
     "pytest>=6.0",
     "pytest-cov>=2.12.1",
     "trio>=0.30.0",
@@ -48,6 +50,9 @@ docs = [
 ]
 deploy = [
     "twine>=4.0.1",
+]
+aws = [
+    "boto>=2.49"
 ]
 
 [project.urls]
