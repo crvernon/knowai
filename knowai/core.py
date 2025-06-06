@@ -18,6 +18,12 @@ from .agent import (
 
 logger = logging.getLogger(__name__)
 
+logging.info(f"AZURE_OPENAI_API_KEY: {os.getenv('AZURE_OPENAI_API_KEY')}")
+logging.info(f"AZURE_OPENAI_API_VERSION: {os.getenv('AZURE_OPENAI_API_VERSION')}")
+logging.info(f"AZURE_OPENAI_DEPLOYMENT: {os.getenv('AZURE_OPENAI_DEPLOYMENT')}")
+logging.info(f"AZURE_OPENAI_ENDPOINT: {os.getenv('AZURE_OPENAI_ENDPOINT')}")
+logging.info(f"AZURE_EMBEDDINGS_DEPLOYMENT: {os.getenv('AZURE_EMBEDDINGS_DEPLOYMENT')}")
+
 class KnowAIAgent:
     """
     Conversational Retrieval‑Augmented Generation (RAG) agent built on a

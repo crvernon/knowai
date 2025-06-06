@@ -21,9 +21,10 @@ from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import StateGraph, END, Graph
 
 # Constants (can be overridden by KnowAIAgent constructor)
-K_CHUNKS_RETRIEVER_DEFAULT = 25 
+K_CHUNKS_RETRIEVER_DEFAULT = 25
+K_CHUNKS_RETRIEVER_ALL_DOCS_DEFAULT = 100000
 COMBINE_THRESHOLD_DEFAULT = 3
-MAX_CONVERSATION_TURNS_DEFAULT = 15
+MAX_CONVERSATION_TURNS_DEFAULT = 25
 
 # Content Policy Error Handling
 CONTENT_POLICY_MESSAGE = "Due to content management policy issues with the AI provider, we are not able to provide a response to this topic. Please rephrase your question and try again."
@@ -32,9 +33,9 @@ CONTENT_POLICY_MESSAGE = "Due to content management policy issues with the AI pr
 # Fetch Azure credentials from environment variables (loaded by core.py)
 api_key = os.getenv("AZURE_OPENAI_API_KEY")
 azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o") 
-embeddings_deployment = os.getenv("AZURE_EMBEDDINGS_DEPLOYMENT", "text-embedding-3-large")
-openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01")
+deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT") 
+embeddings_deployment = os.getenv("AZURE_EMBEDDINGS_DEPLOYMENT")
+openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION")
 
 logger = logging.getLogger(__name__) 
 
@@ -158,8 +159,10 @@ def instantiate_embeddings(state: GraphState) -> GraphState:
         logging.info("Instantiating embeddings model")
         try:
             new_embeddings = AzureOpenAIEmbeddings(
-                azure_deployment=embeddings_deployment, azure_endpoint=azure_endpoint,
-                api_key=api_key, openai_api_version=openai_api_version
+                azure_deployment=os.getenv("AZURE_EMBEDDINGS_DEPLOYMENT"),
+                azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+                api_key=os.getenv("AZURE_OPENAI_API_KEY"), 
+                openai_api_version=os.getenv("AZURE_OPENAI_API_4p1_VERSION")
             )
             state = {**state, "embeddings": new_embeddings}
         except Exception as e:
@@ -199,13 +202,15 @@ def instantiate_llm_large(state: GraphState) -> GraphState:
     node_name = "instantiate_llm_node"
     logging.info(f"--- Starting Node: {node_name} (for query generation) ---")
     if not state.get("llm_large"):
-        logging.info("Instantiating large LLM model (for query generation)")
+    
         try:
             new_llm = AzureChatOpenAI(
-                temperature=0, api_key=api_key, openai_api_version=openai_api_version,
-                azure_deployment=deployment, azure_endpoint=azure_endpoint,
+                temperature=0, 
+                api_version=os.getenv("AZURE_OPENAI_API_4p1_VERSION"),
+                azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
             )
             state = {**state, "llm_large": new_llm}
+
         except Exception as e:
             logging.error(f"Failed to instantiate large LLM model: {e}")
             state = {**state, "llm_large": None}
@@ -300,10 +305,11 @@ def instantiate_retriever(state: GraphState) -> GraphState:
     if "retriever" not in state: state["retriever"] = None
     vectorstore = state.get("vectorstore")
     k_retriever = state.get("k_chunks_retriever", K_CHUNKS_RETRIEVER_DEFAULT)
+    k_retriever_all_docs = state.get("k_chunks_retriever_all_docs", K_CHUNKS_RETRIEVER_ALL_DOCS_DEFAULT)
 
     if vectorstore is None: logging.error("Vectorstore not loaded."); state["retriever"] = None
     else:
-        search_kwargs = {"k": k_retriever}
+        search_kwargs = {"k": k_retriever, "fetch_k": k_retriever_all_docs}
         try:
             base_retriever = vectorstore.as_retriever(search_kwargs=search_kwargs)
             logging.info(f"Base retriever instantiated with default k={k_retriever}.")
@@ -316,8 +322,12 @@ def instantiate_retriever(state: GraphState) -> GraphState:
 
 
 async def _async_retrieve_docs_with_embeddings_for_file(
-    vectorstore: FAISS, file_name: str, query_embeddings_list: List[List[float]],
-    query_list_texts: List[str], k_per_query: int
+    vectorstore: FAISS, 
+    file_name: str, 
+    query_embeddings_list: List[List[float]],
+    query_list_texts: List[str], 
+    k_per_query: int,
+    k_retriever_all_docs: int
 ) -> tuple[str, Optional[List[Document]]]:
     """
     Retrieve document chunks for a single file using pre‑computed query
@@ -350,16 +360,20 @@ async def _async_retrieve_docs_with_embeddings_for_file(
     try:
         for i, query_embedding in enumerate(query_embeddings_list):
             docs_for_embedding = await vectorstore.asimilarity_search_by_vector(
-                embedding=query_embedding, k=k_per_query, filter={"file": file_name}
+                embedding=query_embedding, 
+                k=k_per_query, 
+                fetch_k=k_retriever_all_docs,
+                filter={"file_name": file_name}
             )
             retrieved_docs.extend(docs_for_embedding)
         unique_docs_map: Dict[tuple, Document] = {}
         for doc in retrieved_docs:
-            key = (doc.metadata.get("file"), doc.metadata.get("page"), doc.page_content.strip() if hasattr(doc, 'page_content') else "")
+            key = (doc.metadata.get("file_name"), doc.metadata.get("page"), doc.page_content.strip() if hasattr(doc, 'page_content') else "")
             if key not in unique_docs_map: unique_docs_map[key] = doc
         final_unique_docs = list(unique_docs_map.values())
         logging.info(f"[{file_name}] Retrieved {len(retrieved_docs)} raw -> {len(final_unique_docs)} unique docs.")
         return file_name, final_unique_docs
+    
     except Exception as e_retrieve:
         logging.exception(f"[{file_name}] Error during similarity search by vector: {e_retrieve}")
         return file_name, None
@@ -403,11 +417,16 @@ async def extract_documents_parallel_node(state: GraphState) -> GraphState:
     node_name = "extract_documents_node"
     logging.info(f"--- Starting Node: {node_name} (Async) ---")
     question, llm, base_retriever, vectorstore, embeddings_model, allowed_files = (
-        state.get("question"), state.get("llm_large"), state.get("retriever"),
-        state.get("vectorstore"), state.get("embeddings"), state.get("allowed_files")
+        state.get("question"), 
+        state.get("llm_large"), 
+        state.get("retriever"),
+        state.get("vectorstore"), 
+        state.get("embeddings"), 
+        state.get("allowed_files")
     )
     n_alternatives = state.get("n_alternatives", 4)
     k_per_query = state.get("k_per_query", state.get("k_chunks_retriever", K_CHUNKS_RETRIEVER_DEFAULT))
+    k_retriever_all_docs = state.get("k_chunks_retriever_all_docs", K_CHUNKS_RETRIEVER_ALL_DOCS_DEFAULT)
     current_documents_by_file: Dict[str, List[Document]] = {}
 
     if not question: logging.info(f"[{node_name}] No question. Skipping extraction."); return {**state, "documents_by_file": current_documents_by_file}
@@ -429,6 +448,7 @@ async def extract_documents_parallel_node(state: GraphState) -> GraphState:
         alt_queries = [q.strip() for q in raw_queries_text.split("\n") if q.strip()]
         query_list.extend(list(dict.fromkeys(alt_queries))[:n_alternatives])
         logging.info(f"[{node_name}] Generated {len(query_list)} total unique queries.")
+
     except Exception as e_query_gen:
         if _is_content_policy_error(e_query_gen):
             logging.warning(f"[{node_name}] Content policy violation during query generation. Using original question only. Error: {e_query_gen}")
@@ -440,15 +460,20 @@ async def extract_documents_parallel_node(state: GraphState) -> GraphState:
     query_embeddings_list: List[List[float]] = []
     try:
         logging.info(f"[{node_name}] Embedding {len(query_list)} queries...")
-        query_embeddings_list = await embeddings_model.aembed_documents(query_list) # type: ignore
+        query_embeddings_list = await embeddings_model.aembed_documents(query_list) 
     except Exception as e_embed: logging.exception(f"[{node_name}] Failed to embed queries: {e_embed}"); return {**state, "documents_by_file": current_documents_by_file}
     if not query_embeddings_list or len(query_embeddings_list) != len(query_list):
         logging.error(f"[{node_name}] Query embedding failed/mismatched."); return {**state, "documents_by_file": current_documents_by_file}
 
     tasks = [
         _async_retrieve_docs_with_embeddings_for_file(
-            vectorstore, f_name, query_embeddings_list, query_list, k_per_query # type: ignore
-        ) for f_name in allowed_files # type: ignore
+            vectorstore, 
+            f_name, 
+            query_embeddings_list, 
+            query_list, 
+            k_per_query,
+            k_retriever_all_docs
+        ) for f_name in allowed_files 
     ]
     if tasks:
         results = await asyncio.gather(*tasks)
@@ -519,7 +544,12 @@ Context from File '{filename}' (Chunks from Pages X, Y, Z...):
 Question: {question}
 Detailed Answer (with citations like "quote..." ({filename}, Page X)):"""
         prompt_template = PromptTemplate(template=prompt_text, input_variables=["context", "question", "filename"])
-        llm = AzureChatOpenAI(temperature=0.1, api_key=api_key, openai_api_version=openai_api_version, azure_deployment="gpt-4o", azure_endpoint=azure_endpoint, max_tokens=2000)
+        llm = AzureChatOpenAI(
+            temperature=0.1, 
+            api_version=os.getenv("AZURE_OPENAI_API_4p1_VERSION"),
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            max_tokens=20000
+        )
         chain = prompt_template | llm | StrOutputParser()
         
         async def _gen_ans(fname: str, fdocs: List[Document], q: str) -> tuple[str, str]:
@@ -797,7 +827,11 @@ async def combine_answers_node(state: GraphState) -> GraphState:
     elif not question: output_generation = f"Files selected: {', '.join(allowed_files) if allowed_files else 'any'}. Ask a question."
     else:
         conversation_history_str = _format_conversation_history(conversation_history)
-        llm_instance = AzureChatOpenAI(temperature=0.0, api_key=api_key, openai_api_version=openai_api_version, azure_deployment="gpt-4o", azure_endpoint=azure_endpoint)
+        llm_instance = AzureChatOpenAI(
+            temperature=0.0, 
+            api_version=os.getenv("AZURE_OPENAI_API_4p1_VERSION"),
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+        )
         
         prompt_processed = """You are an expert synthesis assistant. Combine PRE-PROCESSED answers.
 Conversation History: {conversation_history}

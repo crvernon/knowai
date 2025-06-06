@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 from typing import List, Optional
 import argparse
 from tqdm import tqdm
+import pandas as pd
 
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -13,70 +14,34 @@ from langchain_community.vectorstores import FAISS
 from langchain_openai import AzureOpenAIEmbeddings
 
 # Load credentials; make sure dotenv overwrites any system variable settings
-load_dotenv(override=True)
+load_dotenv("/Users/d3y010/repos/crvernon/knowai/.env", override=True)
 
 api_key = os.getenv("AZURE_OPENAI_API_KEY")
 azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-embeddings_deployment = os.getenv("AZURE_EMBEDDINGS_DEPLOYMENT", "text-embedding-3-large")
-openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01")
+embeddings_deployment = os.getenv("AZURE_EMBEDDINGS_DEPLOYMENT")
+openai_api_version = os.getenv("AZURE_OPENAI_API_VERSION")
+openai_embeddings_api_version = os.getenv("AZURE_OPENAI_EMBEDDINGS_API_VERSION")
 
 logger = logging.getLogger(__name__)
 
 
-def get_retriever_from_directory(
+
+def process_pdfs_to_documents(
         directory_path: str,
-        persist_directory: str = "faiss_store",
-        persist: bool = True,
-        k: int = 10,
-) -> Optional[object]:
+        metadata_map: dict,
+        existing_files: set,
+        text_splitter: RecursiveCharacterTextSplitter,
+) -> List[Document]:
     """
-    Processes all PDF files in a directory, creates or updates a FAISS vector store of all chunks,
-    and returns a retriever. Each chunk’s metadata includes the PDF filename and page number.
-    By default, the FAISS index is written to disk in `persist_directory`; set `persist=False`
-    to skip saving and keep the index in memory only. If the store already exists, new PDFs
-    are only added if not already present, based on filename metadata.
+    Process PDF files in a directory, split into chunks, and return a list of Document objects.
+    Skips files not in metadata_map or already in existing_files.
     """
-    if not api_key or not azure_endpoint:
-        logger.error("Azure credentials not available for vector store building.")
-        return None
-
-    # Initialize embeddings
-    embeddings = AzureOpenAIEmbeddings(
-        azure_deployment=embeddings_deployment,
-        azure_endpoint=azure_endpoint,
-        api_key=api_key,
-        openai_api_version=openai_api_version
-    )
-
-    # Load or initialize vectorstore
-    if persist and os.path.exists(persist_directory):
-        try:
-            vectorstore = FAISS.load_local(
-                persist_directory,
-                embeddings,
-                allow_dangerous_deserialization=True
-            )
-            logger.info(f"Loaded existing FAISS store from {persist_directory} with dangerous deserialization allowed")
-        except Exception as e:
-            logger.error(f"Error loading existing FAISS store: {e}")
-            vectorstore = None
-    else:
-        vectorstore = None
-
-    # Determine which files are already present
-    existing_files = set()
-    if vectorstore:
-        for _, doc in vectorstore.docstore._dict.items():
-            existing_files.add(doc.metadata.get("file"))
-
-    # Split and collect new documents
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1500, chunk_overlap=300, length_function=len
-    )
     new_docs: List[Document] = []
-    # iterate over PDF files with progress bar
     pdf_files = [f for f in os.listdir(directory_path) if f.lower().endswith(".pdf")]
     for filename in tqdm(pdf_files, desc="Processing PDF files"):
+        if filename not in metadata_map:
+            logger.warning(f"Skipping {filename}: not found in metadata parquet.")
+            continue
         if filename in existing_files:
             logger.info(f"Skipping {filename}: already in vector store.")
             continue
@@ -97,14 +62,76 @@ def get_retriever_from_directory(
                 continue
             chunks = text_splitter.split_text(text)
             for chunk in chunks:
+                meta = dict(metadata_map[filename])
+                meta["page"] = page_num + 1
                 new_docs.append(Document(
                     page_content=chunk,
-                    metadata={"file": filename, "page": page_num + 1}
+                    metadata=meta
                 ))
         doc.close()
+    return new_docs
+
+
+def get_retriever_from_docs(
+        docs: list,
+        persist_directory: str = "faiss_store",
+        persist: bool = True,
+        k: int = 10,
+        embeddings: "AzureOpenAIEmbeddings" = None,
+) -> Optional[object]:
+    """
+    Given a list of Document objects, creates or updates a FAISS vector store of all chunks,
+    and returns a retriever. By default, the FAISS index is written to disk in `persist_directory`;
+    set `persist=False` to skip saving and keep the index in memory only. If the store already exists,
+    new docs are only added if not already present, based on filename metadata.
+    """
+    if not api_key or not azure_endpoint:
+        logger.error("Azure credentials not available for vector store building.")
+        return None
+
+    # Initialize embeddings if not provided
+    if embeddings is None:
+        embeddings = AzureOpenAIEmbeddings(
+            azure_deployment=embeddings_deployment,
+            azure_endpoint=azure_endpoint,
+            api_key=api_key,
+            openai_api_version=openai_embeddings_api_version
+        )
+
+    # Load or initialize vectorstore
+    if persist and os.path.exists(persist_directory):
+        try:
+            vectorstore = FAISS.load_local(
+                persist_directory,
+                embeddings,
+                allow_dangerous_deserialization=True
+            )
+            logger.info(f"Loaded existing FAISS store from {persist_directory} with dangerous deserialization allowed")
+        except Exception as e:
+            logger.error(f"Error loading existing FAISS store: {e}")
+            vectorstore = None
+    else:
+        vectorstore = None
+
+    # Determine which files are already present
+    existing_files = set()
+    if vectorstore:
+        for _, doc in vectorstore.docstore._dict.items():
+            file_name = doc.metadata.get("file_name")
+            if file_name:
+                existing_files.add(file_name)
+
+    # Filter out docs that are already present (by file_name)
+    new_docs = []
+    for doc in docs:
+        file_name = doc.metadata.get("file_name")
+        if file_name and file_name in existing_files:
+            logger.info(f"Skipping {file_name}: already in vector store.")
+            continue
+        new_docs.append(doc)
 
     if not new_docs and not vectorstore:
-        logger.error(f"No valid chunks extracted from directory: {directory_path}")
+        logger.error(f"No valid chunks to add to vectorstore.")
         return None
 
     # Build or update vectorstore
@@ -210,6 +237,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Build and load a FAISS vector store from PDFs.")
     parser.add_argument("pdf_directory", help="Path to the directory containing PDF files")
     parser.add_argument("--vectorstore_path", default="test_faiss_store", help="Path to save/load the FAISS store")
+    parser.add_argument("--metadata_parquet_path", default="metadata.parquet", help="Path to the metadata parquet file")
     args = parser.parse_args()
 
     # configure logging
@@ -220,6 +248,7 @@ if __name__ == "__main__":
         directory_path=args.pdf_directory,
         persist_directory=args.vectorstore_path,
         persist=True,
+        metadata_parquet_path=args.metadata_parquet_path,
     )
 
     # load and inspect the store
