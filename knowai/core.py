@@ -102,6 +102,8 @@ class KnowAIAgent:
             "conversation_history": [],
             "bypass_individual_generation": False,
             "raw_documents_for_synthesis": None,
+            "combined_documents": None,
+            "detailed_response_desired": True,
             "k_chunks_retriever": k_chunks_retriever,
             "combine_threshold": combine_threshold,
             "max_tokens_individual_answer": max_tokens_individual_answer,
@@ -125,7 +127,8 @@ class KnowAIAgent:
         bypass_individual_gen: bool = False,
         n_alternatives_override: Optional[int] = None,
         k_per_query_override: Optional[int] = None,
-        progress_cb: Optional[Callable[[str, str, Dict[str, Any]], None]] = None
+        progress_cb: Optional[Callable[[str, str, Dict[str, Any]], None]] = None,
+        detailed_response_desired: Optional[bool] = None
     ) -> Dict[str, Any]:
         """
         Processes a single conversational turn.
@@ -143,6 +146,8 @@ class KnowAIAgent:
         self.session_state["allowed_files"] = selected_files
         self.session_state["bypass_individual_generation"] = bypass_individual_gen
         self.session_state["__progress_cb__"] = progress_cb
+        if detailed_response_desired is not None:
+            self.session_state["detailed_response_desired"] = detailed_response_desired
         
         if n_alternatives_override is not None: self.session_state["n_alternatives"] = n_alternatives_override
         if k_per_query_override is not None: self.session_state["k_per_query"] = k_per_query_override

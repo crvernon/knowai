@@ -96,6 +96,8 @@ class GraphState(TypedDict):
     conversation_history: Optional[List[Dict[str, str]]]
     bypass_individual_generation: Optional[bool]
     raw_documents_for_synthesis: Optional[str]
+    combined_documents: Optional[List[Document]]
+    detailed_response_desired: Optional[bool]
     k_chunks_retriever: int
     k_chunks_retriever_all_docs: int
     combine_threshold: int
@@ -573,10 +575,21 @@ async def extract_documents_parallel_node(state: GraphState) -> GraphState:
         results = await asyncio.gather(*tasks)
         for f_name, docs in results: 
             current_documents_by_file[f_name] = docs if docs else []
+        # Build a flattened list of all docs across files
+        combined_docs_list: List[Document] = []
+        for docs in current_documents_by_file.values():
+            if docs:
+                combined_docs_list.extend(docs)
+    else:
+        combined_docs_list: List[Document] = []
 
     duration_node = time.perf_counter() - t_node_start
     logging.info(f"--- Node: {node_name} finished in {duration_node:.4f} seconds ---")
-    return {**state, "documents_by_file": current_documents_by_file}
+    return {
+        **state,
+        "documents_by_file": current_documents_by_file,
+        "combined_documents": combined_docs_list
+    }
 
 
 async def generate_individual_answers_node(state: GraphState) -> GraphState:
@@ -854,7 +867,9 @@ async def _async_combine_answer_chunk(
             if answer == CONTENT_POLICY_MESSAGE: # If a chunk is already a policy message, pass it as is
                 return CONTENT_POLICY_MESSAGE 
             temp_content += f"--- Answer based on file: {filename} ---\n{answer}\n\n"
+
         formatted_chunk_content_for_prompt = temp_content.strip()
+
         if not formatted_chunk_content_for_prompt: # All answers in chunk were policy messages
              return CONTENT_POLICY_MESSAGE 
     else: return f"Error: Invalid input for combining chunk {chunk_name}."
@@ -865,8 +880,10 @@ async def _async_combine_answer_chunk(
         no_info_placeholder = "Not applicable for this intermediate chunk."
         errors_placeholder = "Not applicable for this intermediate chunk."
         combined_text = await chain.ainvoke({
-            "question": question, "formatted_answers_or_raw_docs": formatted_chunk_content_for_prompt,
-            "files_no_info": no_info_placeholder, "files_errors": errors_placeholder,
+            "question": question, 
+            "formatted_answers_or_raw_docs": formatted_chunk_content_for_prompt,
+            "files_no_info": no_info_placeholder,
+            "files_errors": errors_placeholder,
             "conversation_history": conversation_history_str 
         })
         return combined_text
@@ -935,7 +952,9 @@ async def combine_answers_node(state: GraphState) -> GraphState:
     elif not question: output_generation = f"Files selected: {', '.join(allowed_files) if allowed_files else 'any'}. Ask a question."
     else:
         conversation_history_str = _format_conversation_history(conversation_history)
-        llm_instance = state.get("llm_small")
+
+        detailed_flag = state.get("detailed_response_desired", True)    
+        llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
 
         # llm_instance = AzureChatOpenAI(
         #     temperature=0.0, 
@@ -951,6 +970,7 @@ Files with No Relevant Info: {files_no_info}
 Files with Errors: {files_errors}
 Instructions: Synthesize, preserve details & citations (e.g., "quote..." (file.pdf, Page X)). Attribute. Structure. Handle contradictions. Acknowledge files with no info/errors.
 Synthesized Answer:"""
+
         prompt_raw = """You are an expert AI assistant. Answer CURRENT question based ONLY on RAW text chunks.
 Conversation History: {conversation_history}
 User's CURRENT Question: {question}
@@ -963,7 +983,13 @@ Synthesized Answer from RAW Docs:"""
         active_prompt_text = prompt_raw if bypass_flag else prompt_processed
         combo_prompt = PromptTemplate(
             template=active_prompt_text, 
-            input_variables=["question", "formatted_answers_or_raw_docs", "files_no_info", "files_errors", "conversation_history"]
+            input_variables=[
+                "question", 
+                "formatted_answers_or_raw_docs", 
+                "files_no_info", 
+                "files_errors", 
+                "conversation_history"
+            ]
         )
         
         no_info_list: List[str] = []
@@ -972,15 +998,27 @@ Synthesized Answer from RAW Docs:"""
 
         if bypass_flag:
             logging.info(f"[{node_name}] Combining raw documents.")
-            content_llm = raw_docs_for_synthesis if raw_docs_for_synthesis else "No raw documents."
-            if not raw_docs_for_synthesis or "No documents retrieved" in raw_docs_for_synthesis or "No files selected" in raw_docs_for_synthesis:
-                output_generation = raw_docs_for_synthesis
+            combined_docs_list = state.get("combined_documents") or []
+
+            if combined_docs_list:
+                temp_lines = []
+                for doc in combined_docs_list:
+                    fname = doc.metadata.get("file_name", "unknown")
+                    page = doc.metadata.get("page", "N/A")
+                    temp_lines.append(
+                        f"--- File: {fname} | Page: {page} ---\n{doc.page_content}"
+                    )
+                content_llm = "\n\n".join(temp_lines)
             else:
-                docs_by_file = state.get("documents_by_file", {})
-                if allowed_files:
-                    for af in allowed_files:
-                        if not docs_by_file.get(af): no_info_list.append(f"`{af}`")
-                error_list.append("Error tracking for raw path not detailed here.")
+                content_llm = raw_docs_for_synthesis if raw_docs_for_synthesis else "No raw documents."
+
+            # Track files with no docs
+            docs_by_file = state.get("documents_by_file", {})
+            if allowed_files:
+                for af in allowed_files:
+                    if not docs_by_file.get(af):
+                        no_info_list.append(f"`{af}`")
+            error_list.append("Error tracking for raw path not detailed here.")
         else: 
             if not individual_answers: output_generation = "No individual answers to combine."
             else:
