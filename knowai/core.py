@@ -65,7 +65,8 @@ class KnowAIAgent:
         max_conversation_turns: int = MAX_CONVERSATION_TURNS_DEFAULT,
         k_chunks_retriever: int = K_CHUNKS_RETRIEVER_DEFAULT,
         env_file_path: Optional[str] = None, 
-        initial_state_overrides: Optional[Dict[str, Any]] = None
+        initial_state_overrides: Optional[Dict[str, Any]] = None,
+        log_graph: bool = False
     ) -> None:
         if env_file_path and os.path.exists(env_file_path):
             load_dotenv(dotenv_path=env_file_path)
@@ -92,7 +93,8 @@ class KnowAIAgent:
                 if key in self.session_state: self.session_state[key] = value # type: ignore
                 else: logging.warning(f"Ignoring unknown key '{key}' in initial_state_overrides.")
 
-        logging.info(self.graph_app.get_graph().draw_mermaid())
+        if log_graph:
+            logging.info(self.graph_app.get_graph().draw_mermaid())
         
         logging.info("KnowAIAgent initialized. Component loading will occur on the first 'process_turn' call.")
 
