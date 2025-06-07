@@ -20,11 +20,6 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser 
 from langgraph.graph import StateGraph, END, Graph
 
-# Constants (can be overridden by KnowAIAgent constructor)
-K_CHUNKS_RETRIEVER_DEFAULT = 25
-K_CHUNKS_RETRIEVER_ALL_DOCS_DEFAULT = 100000
-COMBINE_THRESHOLD_DEFAULT = 3
-MAX_CONVERSATION_TURNS_DEFAULT = 25
 
 # Content Policy Error Handling
 CONTENT_POLICY_MESSAGE = "Due to content management policy issues with the AI provider, we are not able to provide a response to this topic. Please rephrase your question and try again."
@@ -55,6 +50,8 @@ class GraphState(TypedDict):
         Loaded FAISS vector store. ``None`` until loaded.
     llm_large : Optional[AzureChatOpenAI]
         Large language model used for query generation and synthesis.
+    llm_small : Optional[AzureChatOpenAI]
+        Small language model used for query generation.
     retriever : Optional[VectorStoreRetriever]
         Retriever built from the FAISS vector store.
     allowed_files : Optional[List[str]]
@@ -87,6 +84,7 @@ class GraphState(TypedDict):
     vectorstore_path: str 
     vectorstore: Optional[FAISS]
     llm_large: Optional[AzureChatOpenAI] 
+    llm_small: Optional[AzureChatOpenAI] 
     retriever: Optional[VectorStoreRetriever] 
     allowed_files: Optional[List[str]] 
     question: Optional[str] 
@@ -99,8 +97,9 @@ class GraphState(TypedDict):
     bypass_individual_generation: Optional[bool]
     raw_documents_for_synthesis: Optional[str]
     k_chunks_retriever: int
+    k_chunks_retriever_all_docs: int
     combine_threshold: int
-
+    max_tokens_individual_answer: int 
 
 def _is_content_policy_error(e: Exception) -> bool:
     """
@@ -199,13 +198,13 @@ def instantiate_llm_large(state: GraphState) -> GraphState:
         instantiation failed).
     """
     t_node_start = time.perf_counter()
-    node_name = "instantiate_llm_node"
+    node_name = "instantiate_llm_large_node"
     logging.info(f"--- Starting Node: {node_name} (for query generation) ---")
     if not state.get("llm_large"):
     
         try:
             new_llm = AzureChatOpenAI(
-                temperature=0, 
+                temperature=0.1, 
                 api_version=os.getenv("AZURE_OPENAI_API_4p1_VERSION"),
                 azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
             )
@@ -216,6 +215,52 @@ def instantiate_llm_large(state: GraphState) -> GraphState:
             state = {**state, "llm_large": None}
     else:
         logging.info("Using pre-instantiated large LLM model (for query generation)")
+    duration_node = time.perf_counter() - t_node_start
+    logging.info(f"--- Node: {node_name} finished in {duration_node:.4f} seconds ---")
+    return state
+
+
+def instantiate_llm_small(state: GraphState) -> GraphState:
+    """
+    Instantiate and attach a small Azure OpenAI chat model to the graph
+    state for query generation.
+
+    The function first checks whether an LLM instance already exists in
+    ``state``. If it does not, a new
+    :class:`langchain_openai.AzureChatOpenAI` model is created using the
+    deployment, endpoint, API key, and version specified by the
+    module‑level Azure configuration variables. On any exception, the error
+    is logged and the ``llm_small`` field is set to ``None``.
+
+    Parameters
+    ----------
+    state : GraphState
+        Current state dictionary flowing through the LangGraph agent.
+
+    Returns
+    -------
+    GraphState
+        Updated state containing the small LLM instance (or ``None`` if
+        instantiation failed).
+    """
+    t_node_start = time.perf_counter()
+    node_name = "instantiate_llm_small_node"
+    logging.info(f"--- Starting Node: {node_name} (for query generation) ---")
+    if not state.get("llm_small"):
+    
+        try:
+            new_llm = AzureChatOpenAI(
+                temperature=0.1, 
+                api_version=os.getenv("AZURE_OPENAI_API_4p1_VERSION"),
+                azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NANO"),
+            )
+            state = {**state, "llm_small": new_llm}
+
+        except Exception as e:
+            logging.error(f"Failed to instantiate small LLM model: {e}")
+            state = {**state, "llm_small": None}
+    else:
+        logging.info("Using pre-instantiated small LLM model (for query generation)")
     duration_node = time.perf_counter() - t_node_start
     logging.info(f"--- Node: {node_name} finished in {duration_node:.4f} seconds ---")
     return state
@@ -253,9 +298,12 @@ def load_faiss_vectorstore(state: GraphState) -> GraphState:
     
     if "vectorstore" not in state: state["vectorstore"] = None 
 
-    if state.get("vectorstore"): logging.info("Vectorstore already exists in state.")
-    elif not current_vectorstore_path: logging.error("Vectorstore path not provided in state."); state["vectorstore"] = None
-    elif not embeddings: logging.error("Embeddings not instantiated."); state["vectorstore"] = None
+    if state.get("vectorstore"): 
+        logging.info("Vectorstore already exists in state.")
+    elif not current_vectorstore_path: 
+        logging.error("Vectorstore path not provided in state."); state["vectorstore"] = None
+    elif not embeddings: 
+        logging.error("Embeddings not instantiated."); state["vectorstore"] = None
     elif not os.path.exists(current_vectorstore_path) or not os.path.isdir(current_vectorstore_path):
         logging.error(f"FAISS vectorstore path does not exist or is not a directory: {current_vectorstore_path}"); state["vectorstore"] = None
     else:
@@ -302,20 +350,32 @@ def instantiate_retriever(state: GraphState) -> GraphState:
     t_node_start = time.perf_counter()
     node_name = "instantiate_retriever_node"
     logging.info(f"--- Starting Node: {node_name} ---")
-    if "retriever" not in state: state["retriever"] = None
+    if "retriever" not in state: 
+        state["retriever"] = None
     vectorstore = state.get("vectorstore")
-    k_retriever = state.get("k_chunks_retriever", K_CHUNKS_RETRIEVER_DEFAULT)
-    k_retriever_all_docs = state.get("k_chunks_retriever_all_docs", K_CHUNKS_RETRIEVER_ALL_DOCS_DEFAULT)
+    k_retriever = state.get("k_chunks_retriever")
+    k_retriever_all_docs = state.get("k_chunks_retriever_all_docs")
 
-    if vectorstore is None: logging.error("Vectorstore not loaded."); state["retriever"] = None
+    if vectorstore is None: 
+        logging.error("Vectorstore not loaded.")
+        state["retriever"] = None
     else:
+        if k_retriever is None: 
+            logging.error("k_chunks_retriever not set.")
+            state["retriever"] = None
+        elif k_retriever_all_docs is None: 
+            logging.error("k_chunks_retriever_all_docs not set.")
+            state["retriever"] = None
+            
         search_kwargs = {"k": k_retriever, "fetch_k": k_retriever_all_docs}
+
         try:
             base_retriever = vectorstore.as_retriever(search_kwargs=search_kwargs)
             logging.info(f"Base retriever instantiated with default k={k_retriever}.")
             state = {**state, "retriever": base_retriever}
         except Exception as e:
             logging.exception(f"Failed to instantiate base retriever: {e}"); state["retriever"] = None
+            
     duration_node = time.perf_counter() - t_node_start
     logging.info(f"--- Node: {node_name} finished in {duration_node:.4f} seconds ---")
     return state
@@ -355,22 +415,28 @@ async def _async_retrieve_docs_with_embeddings_for_file(
         unique :class:`langchain_core.documents.Document` instances on
         success, or ``None`` if retrieval fails.
     """
-    logging.info(f"Retrieving for file: {file_name} using {len(query_embeddings_list)} pre-computed query embeddings.")
+    # logging.info(f"Retrieving for file: {file_name} using {len(query_embeddings_list)} pre-computed query embeddings.")
     retrieved_docs: List[Document] = []
     try:
         for i, query_embedding in enumerate(query_embeddings_list):
+
             docs_for_embedding = await vectorstore.asimilarity_search_by_vector(
                 embedding=query_embedding, 
                 k=k_per_query, 
                 fetch_k=k_retriever_all_docs,
                 filter={"file_name": file_name}
             )
+
             retrieved_docs.extend(docs_for_embedding)
+
         unique_docs_map: Dict[tuple, Document] = {}
         for doc in retrieved_docs:
             key = (doc.metadata.get("file_name"), doc.metadata.get("page"), doc.page_content.strip() if hasattr(doc, 'page_content') else "")
-            if key not in unique_docs_map: unique_docs_map[key] = doc
+            if key not in unique_docs_map: 
+                unique_docs_map[key] = doc
+
         final_unique_docs = list(unique_docs_map.values())
+
         logging.info(f"[{file_name}] Retrieved {len(retrieved_docs)} raw -> {len(final_unique_docs)} unique docs.")
         return file_name, final_unique_docs
     
@@ -403,8 +469,13 @@ async def extract_documents_parallel_node(state: GraphState) -> GraphState:
     ----------
     state : GraphState
         Current mutable graph state. Expected to contain the keys
-        ``question``, ``llm_large``, ``retriever``, ``vectorstore``,
-        ``embeddings``, and ``allowed_files``.
+        ``question``, 
+        ``llm_large``, 
+        ``llm_small``, 
+        ``retriever``, 
+        ``vectorstore``,
+        ``embeddings``, 
+        ``allowed_files``.
 
     Returns
     -------
@@ -416,37 +487,56 @@ async def extract_documents_parallel_node(state: GraphState) -> GraphState:
     t_node_start = time.perf_counter()
     node_name = "extract_documents_node"
     logging.info(f"--- Starting Node: {node_name} (Async) ---")
-    question, llm, base_retriever, vectorstore, embeddings_model, allowed_files = (
+    question, llm_large, llm_small, base_retriever, vectorstore, embeddings_model, allowed_files = (
         state.get("question"), 
         state.get("llm_large"), 
+        state.get("llm_small"),
         state.get("retriever"),
         state.get("vectorstore"), 
         state.get("embeddings"), 
         state.get("allowed_files")
     )
+
     n_alternatives = state.get("n_alternatives", 4)
-    k_per_query = state.get("k_per_query", state.get("k_chunks_retriever", K_CHUNKS_RETRIEVER_DEFAULT))
-    k_retriever_all_docs = state.get("k_chunks_retriever_all_docs", K_CHUNKS_RETRIEVER_ALL_DOCS_DEFAULT)
+    k_per_query = state.get("k_chunks_retriever")
+    k_retriever_all_docs = state.get("k_chunks_retriever_all_docs")
     current_documents_by_file: Dict[str, List[Document]] = {}
 
-    if not question: logging.info(f"[{node_name}] No question. Skipping extraction."); return {**state, "documents_by_file": current_documents_by_file}
-    if not allowed_files: logging.info(f"[{node_name}] No files selected. Skipping extraction."); return {**state, "documents_by_file": current_documents_by_file}
-    if not all([llm, base_retriever, vectorstore, embeddings_model]):
-        logging.error(f"[{node_name}] Missing components for extraction. Halting."); return {**state, "documents_by_file": current_documents_by_file}
+    if not question: 
+        logging.info(f"[{node_name}] No question. Skipping extraction.")
+        return {**state, "documents_by_file": current_documents_by_file}
+    
+    if not allowed_files: 
+        logging.info(f"[{node_name}] No files selected. Skipping extraction.")
+        return {**state, "documents_by_file": current_documents_by_file}
+    
+    if not all([llm_large, llm_small, base_retriever, vectorstore, embeddings_model]):
+        logging.error(f"[{node_name}] Missing components for extraction. Halting.")
+        return {**state, "documents_by_file": current_documents_by_file}
 
     query_list: List[str] = [question]
     try:
         logging.info(f"[{node_name}] Generating alternative queries...")
-        mqr_llm_chain = MultiQueryRetriever.from_llm(retriever=base_retriever, llm=llm).llm_chain # type: ignore
+
+        mqr_llm_chain = MultiQueryRetriever.from_llm(retriever=base_retriever, llm=llm_small).llm_chain
+
         llm_response = await mqr_llm_chain.ainvoke({"question": question})
         raw_queries_text = ""
-        if isinstance(llm_response, dict): raw_queries_text = str(llm_response.get(mqr_llm_chain.output_key, ""))
-        elif isinstance(llm_response, str): raw_queries_text = llm_response
-        elif isinstance(llm_response, list): raw_queries_text = "\n".join(str(item).strip() for item in llm_response if isinstance(item, str) and str(item).strip())
-        else: raw_queries_text = str(llm_response)
+        if isinstance(llm_response, dict): 
+            raw_queries_text = str(llm_response.get(mqr_llm_chain.output_key, ""))
+
+        elif isinstance(llm_response, str): 
+            raw_queries_text = llm_response
+
+        elif isinstance(llm_response, list): 
+            raw_queries_text = "\n".join(str(item).strip() for item in llm_response if isinstance(item, str) and str(item).strip())
+
+        else: 
+            raw_queries_text = str(llm_response)
         
         alt_queries = [q.strip() for q in raw_queries_text.split("\n") if q.strip()]
         query_list.extend(list(dict.fromkeys(alt_queries))[:n_alternatives])
+
         logging.info(f"[{node_name}] Generated {len(query_list)} total unique queries.")
 
     except Exception as e_query_gen:
@@ -461,9 +551,13 @@ async def extract_documents_parallel_node(state: GraphState) -> GraphState:
     try:
         logging.info(f"[{node_name}] Embedding {len(query_list)} queries...")
         query_embeddings_list = await embeddings_model.aembed_documents(query_list) 
-    except Exception as e_embed: logging.exception(f"[{node_name}] Failed to embed queries: {e_embed}"); return {**state, "documents_by_file": current_documents_by_file}
+    except Exception as e_embed: 
+        logging.exception(f"[{node_name}] Failed to embed queries: {e_embed}")
+        return {**state, "documents_by_file": current_documents_by_file}
+    
     if not query_embeddings_list or len(query_embeddings_list) != len(query_list):
-        logging.error(f"[{node_name}] Query embedding failed/mismatched."); return {**state, "documents_by_file": current_documents_by_file}
+        logging.error(f"[{node_name}] Query embedding failed/mismatched.")
+        return {**state, "documents_by_file": current_documents_by_file}
 
     tasks = [
         _async_retrieve_docs_with_embeddings_for_file(
@@ -477,7 +571,9 @@ async def extract_documents_parallel_node(state: GraphState) -> GraphState:
     ]
     if tasks:
         results = await asyncio.gather(*tasks)
-        for f_name, docs in results: current_documents_by_file[f_name] = docs if docs else []
+        for f_name, docs in results: 
+            current_documents_by_file[f_name] = docs if docs else []
+
     duration_node = time.perf_counter() - t_node_start
     logging.info(f"--- Node: {node_name} finished in {duration_node:.4f} seconds ---")
     return {**state, "documents_by_file": current_documents_by_file}
@@ -544,12 +640,15 @@ Context from File '{filename}' (Chunks from Pages X, Y, Z...):
 Question: {question}
 Detailed Answer (with citations like "quote..." ({filename}, Page X)):"""
         prompt_template = PromptTemplate(template=prompt_text, input_variables=["context", "question", "filename"])
-        llm = AzureChatOpenAI(
-            temperature=0.1, 
-            api_version=os.getenv("AZURE_OPENAI_API_4p1_VERSION"),
-            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
-            max_tokens=20000
-        )
+
+        # llm = state.get("llm_large")
+        llm = state.get("llm_small")
+        # llm = AzureChatOpenAI(
+        #     temperature=0.1, 
+        #     api_version=os.getenv("AZURE_OPENAI_API_4p1_VERSION"),
+        #     azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+        #     max_tokens=state.get("max_tokens_individual_answer")
+        # )
         chain = prompt_template | llm | StrOutputParser()
         
         async def _gen_ans(fname: str, fdocs: List[Document], q: str) -> tuple[str, str]:
@@ -690,8 +789,12 @@ def _format_conversation_history(
 
 
 async def _async_combine_answer_chunk(
-    question: str, answer_chunk_input: Union[Dict[str, str], str], llm_combiner: BaseLanguageModel,
-    combination_prompt_template: PromptTemplate, chunk_name: str, conversation_history_str: str,
+    question: str, 
+    answer_chunk_input: Union[Dict[str, str], str], 
+    llm_combiner: BaseLanguageModel,
+    combination_prompt_template: PromptTemplate, 
+    chunk_name: str, 
+    conversation_history_str: str,
     is_raw_chunk: bool
 ) -> str:
     """
@@ -741,6 +844,7 @@ async def _async_combine_answer_chunk(
         description.
     """
     logging.info(f"Combining answer chunk: {chunk_name} (is_raw_chunk: {is_raw_chunk}).")
+
     formatted_chunk_content_for_prompt: str
     if is_raw_chunk and isinstance(answer_chunk_input, str):
         formatted_chunk_content_for_prompt = answer_chunk_input
@@ -756,6 +860,7 @@ async def _async_combine_answer_chunk(
     else: return f"Error: Invalid input for combining chunk {chunk_name}."
 
     chain = combination_prompt_template | llm_combiner | StrOutputParser()
+
     try:
         no_info_placeholder = "Not applicable for this intermediate chunk."
         errors_placeholder = "Not applicable for this intermediate chunk."
@@ -815,11 +920,14 @@ async def combine_answers_node(state: GraphState) -> GraphState:
     logging.info(f"--- Starting Node: {node_name} (Async) ---")
 
     question, individual_answers, allowed_files, conversation_history, bypass_flag, raw_docs_for_synthesis = (
-        state.get("question"), state.get("individual_answers"), state.get("allowed_files"),
-        state.get("conversation_history"), state.get("bypass_individual_generation", False),
+        state.get("question"), 
+        state.get("individual_answers"), 
+        state.get("allowed_files"),
+        state.get("conversation_history"), 
+        state.get("bypass_individual_generation", False),
         state.get("raw_documents_for_synthesis")
     )
-    combine_thresh = state.get("combine_threshold", COMBINE_THRESHOLD_DEFAULT)
+    combine_thresh = state.get("combine_threshold")
     output_generation: Optional[str] = "Error during synthesis."
     state_to_return = {**state}
 
@@ -827,11 +935,13 @@ async def combine_answers_node(state: GraphState) -> GraphState:
     elif not question: output_generation = f"Files selected: {', '.join(allowed_files) if allowed_files else 'any'}. Ask a question."
     else:
         conversation_history_str = _format_conversation_history(conversation_history)
-        llm_instance = AzureChatOpenAI(
-            temperature=0.0, 
-            api_version=os.getenv("AZURE_OPENAI_API_4p1_VERSION"),
-            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
-        )
+        llm_instance = state.get("llm_small")
+
+        # llm_instance = AzureChatOpenAI(
+        #     temperature=0.0, 
+        #     api_version=os.getenv("AZURE_OPENAI_API_4p1_VERSION"),
+        #     azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NANO"),
+        # )
         
         prompt_processed = """You are an expert synthesis assistant. Combine PRE-PROCESSED answers.
 Conversation History: {conversation_history}
@@ -851,7 +961,10 @@ Instructions: Read raw text. Answer ONLY from raw text. Quote with citations (e.
 Synthesized Answer from RAW Docs:"""
         
         active_prompt_text = prompt_raw if bypass_flag else prompt_processed
-        combo_prompt = PromptTemplate(template=active_prompt_text, input_variables=["question", "formatted_answers_or_raw_docs", "files_no_info", "files_errors", "conversation_history"])
+        combo_prompt = PromptTemplate(
+            template=active_prompt_text, 
+            input_variables=["question", "formatted_answers_or_raw_docs", "files_no_info", "files_errors", "conversation_history"]
+        )
         
         no_info_list: List[str] = []
         error_list: List[str] = []
@@ -1011,7 +1124,8 @@ def create_graph_app() -> Graph:
     """
     workflow = StateGraph(GraphState)
     workflow.add_node("instantiate_embeddings_node", instantiate_embeddings)
-    workflow.add_node("instantiate_llm_node", instantiate_llm_large)
+    workflow.add_node("instantiate_llm_large_node", instantiate_llm_large)
+    workflow.add_node("instantiate_llm_small_node", instantiate_llm_small)
     workflow.add_node("load_vectorstore_node", load_faiss_vectorstore)
     workflow.add_node("instantiate_retriever_node", instantiate_retriever)
     workflow.add_node("extract_documents_node", extract_documents_parallel_node)
@@ -1020,8 +1134,9 @@ def create_graph_app() -> Graph:
     workflow.add_node("combine_answers_node", combine_answers_node) 
 
     workflow.set_entry_point("instantiate_embeddings_node")
-    workflow.add_edge("instantiate_embeddings_node", "instantiate_llm_node")
-    workflow.add_edge("instantiate_llm_node", "load_vectorstore_node")
+    workflow.add_edge("instantiate_embeddings_node", "instantiate_llm_large_node")
+    workflow.add_edge("instantiate_llm_large_node", "instantiate_llm_small_node")
+    workflow.add_edge("instantiate_llm_small_node", "load_vectorstore_node")
     workflow.add_edge("load_vectorstore_node", "instantiate_retriever_node")
     workflow.add_edge("instantiate_retriever_node", "extract_documents_node")
     workflow.add_conditional_edges(
