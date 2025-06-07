@@ -3,26 +3,26 @@ import asyncio
 import logging
 import os
 import time
-from typing import List, Dict, Optional, Union, Any
+from typing import List, Dict, Optional, Union, Any, Callable
 from collections import deque
 
 from dotenv import load_dotenv
 
 from .agent import (
     GraphState, 
-    create_graph_app, 
-    K_CHUNKS_RETRIEVER_DEFAULT, 
-    COMBINE_THRESHOLD_DEFAULT,
-    MAX_CONVERSATION_TURNS_DEFAULT
+    create_graph_app,
 )
+
+K_CHUNKS_RETRIEVER_DEFAULT = 20
+K_CHUNKS_RETRIEVER_ALL_DOCS_DEFAULT = 100000
+COMBINE_THRESHOLD_DEFAULT = 500
+MAX_CONVERSATION_TURNS_DEFAULT = 25
+MAX_TOKENS_INDIVIDUAL_ANSWER_DEFAULT = 20000
+N_QUERY_ALTERNATIVES_DEFAULT = 1
+
 
 logger = logging.getLogger(__name__)
 
-logging.info(f"AZURE_OPENAI_API_KEY: {os.getenv('AZURE_OPENAI_API_KEY')}")
-logging.info(f"AZURE_OPENAI_API_VERSION: {os.getenv('AZURE_OPENAI_API_VERSION')}")
-logging.info(f"AZURE_OPENAI_DEPLOYMENT: {os.getenv('AZURE_OPENAI_DEPLOYMENT')}")
-logging.info(f"AZURE_OPENAI_ENDPOINT: {os.getenv('AZURE_OPENAI_ENDPOINT')}")
-logging.info(f"AZURE_EMBEDDINGS_DEPLOYMENT: {os.getenv('AZURE_EMBEDDINGS_DEPLOYMENT')}")
 
 class KnowAIAgent:
     """
@@ -69,8 +69,11 @@ class KnowAIAgent:
         combine_threshold: int = COMBINE_THRESHOLD_DEFAULT,
         max_conversation_turns: int = MAX_CONVERSATION_TURNS_DEFAULT,
         k_chunks_retriever: int = K_CHUNKS_RETRIEVER_DEFAULT,
+        max_tokens_individual_answer: int = MAX_TOKENS_INDIVIDUAL_ANSWER_DEFAULT,
+        k_chunks_retriever_all_docs: int = K_CHUNKS_RETRIEVER_ALL_DOCS_DEFAULT,
         env_file_path: Optional[str] = None, 
-        initial_state_overrides: Optional[Dict[str, Any]] = None
+        initial_state_overrides: Optional[Dict[str, Any]] = None,
+        log_graph: bool = False
     ) -> None:
         if env_file_path and os.path.exists(env_file_path):
             load_dotenv(dotenv_path=env_file_path)
@@ -84,20 +87,36 @@ class KnowAIAgent:
         self.max_conversation_turns = max_conversation_turns
         
         self.session_state: GraphState = {
-            "embeddings": None, "vectorstore_path": vectorstore_path, "vectorstore": None,
-            "llm_large": None, "retriever": None, "allowed_files": None, "question": None,
-            "documents_by_file": None, "individual_answers": None,
-            "n_alternatives": 4, "k_per_query": 10, "generation": None,
-            "conversation_history": [], "bypass_individual_generation": False,
+            "embeddings": None,
+            "vectorstore_path": vectorstore_path,
+            "vectorstore": None,
+            "llm_large": None,
+            "retriever": None,
+            "allowed_files": None,
+            "question": None,
+            "documents_by_file": None,
+            "individual_answers": None,
+            "n_alternatives": N_QUERY_ALTERNATIVES_DEFAULT,
+            "k_per_query": 10,
+            "generation": None,
+            "conversation_history": [],
+            "bypass_individual_generation": False,
             "raw_documents_for_synthesis": None,
-            "k_chunks_retriever": k_chunks_retriever, "combine_threshold": combine_threshold,
+            "combined_documents": None,
+            "detailed_response_desired": True,
+            "k_chunks_retriever": k_chunks_retriever,
+            "combine_threshold": combine_threshold,
+            "max_tokens_individual_answer": max_tokens_individual_answer,
+            "k_chunks_retriever_all_docs": k_chunks_retriever_all_docs,
+            "__progress_cb__": None,
         }
         if initial_state_overrides:
             for key, value in initial_state_overrides.items():
                 if key in self.session_state: self.session_state[key] = value # type: ignore
                 else: logging.warning(f"Ignoring unknown key '{key}' in initial_state_overrides.")
 
-        logging.info(self.graph_app.get_graph().draw_mermaid())
+        if log_graph:
+            logging.info(self.graph_app.get_graph().draw_mermaid())
         
         logging.info("KnowAIAgent initialized. Component loading will occur on the first 'process_turn' call.")
 
@@ -107,8 +126,10 @@ class KnowAIAgent:
         selected_files: Optional[List[str]] = None,
         bypass_individual_gen: bool = False,
         n_alternatives_override: Optional[int] = None,
-        k_per_query_override: Optional[int] = None
-    ) -> Dict[str, Any]: # Updated return type
+        k_per_query_override: Optional[int] = None,
+        progress_cb: Optional[Callable[[str, str, Dict[str, Any]], None]] = None,
+        detailed_response_desired: Optional[bool] = None
+    ) -> Dict[str, Any]:
         """
         Processes a single conversational turn.
 
@@ -119,11 +140,14 @@ class KnowAIAgent:
                 "documents_by_file": Dictionary of retrieved documents per file.
                 "raw_documents_for_synthesis": Formatted raw documents if bypass was used.
         """
-        logging.info(f"KnowAIAgent.process_turn called. Question: '{user_question}', Files: {selected_files}, Bypass: {bypass_individual_gen}")
+        # logging.info(f"KnowAIAgent.process_turn called. Question: '{user_question}', Files: {selected_files}, Bypass: {bypass_individual_gen}")
 
         self.session_state["question"] = user_question
         self.session_state["allowed_files"] = selected_files
         self.session_state["bypass_individual_generation"] = bypass_individual_gen
+        self.session_state["__progress_cb__"] = progress_cb
+        if detailed_response_desired is not None:
+            self.session_state["detailed_response_desired"] = detailed_response_desired
         
         if n_alternatives_override is not None: self.session_state["n_alternatives"] = n_alternatives_override
         if k_per_query_override is not None: self.session_state["k_per_query"] = k_per_query_override
