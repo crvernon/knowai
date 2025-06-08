@@ -11,12 +11,14 @@ authors = [
 ]
 description = "A conversational RAG agent pipeline using LangGraph"
 readme = "README.md"
-requires-python = ">=3.13" # Adjusted based on PyMuPDF and asyncio features
+requires-python = ">=3.11" # Adjusted based on PyMuPDF and asyncio features
 maintainers = [
     {name = "Chris Vernon", email = "chris.vernon@pnnl.gov"},
 ]
 classifiers = [
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.11",
     "Operating System :: OS Independent",
 ]
 dependencies = [
