@@ -14,7 +14,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_openai import AzureOpenAIEmbeddings
 
 # Load credentials; make sure dotenv overwrites any system variable settings
-load_dotenv("/Users/d3y010/repos/crvernon/knowai/.env", override=True)
+load_dotenv( override=True)
 
 api_key = os.getenv("AZURE_OPENAI_API_KEY")
 azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
@@ -136,6 +136,23 @@ def get_retriever_from_docs(
 
     # Build or update vectorstore
     if vectorstore:
+        embedding_model = AzureOpenAIEmbeddings(
+            azure_deployment=embeddings_deployment,
+            azure_endpoint=azure_endpoint,
+            api_key=api_key,
+            openai_api_version=openai_embeddings_api_version
+        )
+        try:
+            embeddings = embedding_model.embed_documents(["test sentence for embedding"])
+            print("✅ Embedding shape:", len(embeddings), "x", len(embeddings[0]) if embeddings else 0)
+        except Exception as e:
+            print("❌ Embedding failed:", e)
+
+        # Check what embeddings are being returned
+        sample_texts = [doc.page_content for doc in new_docs[:3]]
+        sample_embeddings = embedding_model.embed_documents(sample_texts)
+        print("Embedding shape for first chunk:", len(sample_embeddings), "x", len(sample_embeddings[0]) if sample_embeddings else 0)
+
         vectorstore.add_documents(new_docs)
         logger.info(f"Added {len(new_docs)} new chunks to FAISS store")
     else:
@@ -199,7 +216,7 @@ def load_vectorstore(persist_directory: str, k: int = 10) -> Optional[object]:
             azure_deployment=embeddings_deployment,
             azure_endpoint=azure_endpoint,
             api_key=api_key,
-            openai_api_version=openai_api_version
+            openai_api_version=openai_embeddings_api_version
         )
         vectorstore = FAISS.load_local(
             persist_directory,
@@ -243,12 +260,34 @@ if __name__ == "__main__":
     # configure logging
     logging.basicConfig(level=logging.INFO)
 
-    # build or update the vector store
-    get_retriever_from_directory(
+    # load metadata
+    metadata_df = pd.read_parquet(args.metadata_parquet_path)
+    metadata_map = metadata_df.set_index("file").to_dict(orient="index")
+
+    # create a text splitter
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+
+    # load existing vectorstore to get already processed files
+    if os.path.exists(args.vectorstore_path):
+        existing_vectorstore = load_vectorstore(args.vectorstore_path)
+        existing_files = set(list_vectorstore_files(existing_vectorstore))
+    else:
+        existing_vectorstore = None
+        existing_files = set()
+
+    # process new documents
+    docs = process_pdfs_to_documents(
         directory_path=args.pdf_directory,
+        metadata_map=metadata_map,
+        existing_files=existing_files,
+        text_splitter=text_splitter
+    )
+
+    # build or update the vectorstore
+    retriever = get_retriever_from_docs(
+        docs=docs,
         persist_directory=args.vectorstore_path,
-        persist=True,
-        metadata_parquet_path=args.metadata_parquet_path,
+        persist=True
     )
 
     # load and inspect the store
