@@ -4,6 +4,7 @@ from pathlib import Path
 import asyncio
 import logging
 from typing import List, Dict, Optional, Any
+import pickle
 
 # Assuming 'knowai' package is installed or in PYTHONPATH
 try:
@@ -69,9 +70,38 @@ if "simple_messages" not in st.session_state:
     st.session_state.simple_messages = [] # Stores {"role": "user/assistant", "content": "..."}
 if "simple_selected_files" not in st.session_state:
     st.session_state.simple_selected_files = []
-if "simple_available_files" not in st.session_state: # Placeholder
-    st.session_state.simple_available_files = ["ID_OR_Idaho_Power_2022.pdf", "OR_City_of_Bandon_2024.pdf", "Example_Doc_A.pdf"] 
+if "simple_available_files" not in st.session_state: #filename read from vectorstore
+    index_pkl_path = VECTORSTORE_PATH / "index.pkl"
+    
+    if index_pkl_path.exists():
+        try:
+            with open(index_pkl_path, "rb") as f:
+                data = pickle.load(f)
+            
+            filenames = set()
+            
+            # Handle your tuple with InMemoryDocstore
+            if isinstance(data, tuple) and len(data) >= 1:
+                docstore = data[0]
+                docs_dict = getattr(docstore, "_dict", {})
+                for doc in docs_dict.values():
+                    metadata = getattr(doc, "metadata", {})
+                    file_name = metadata.get("file") or metadata.get("source")
+                    if file_name and file_name.endswith(".pdf"):
+                        filenames.add(os.path.basename(file_name))
+            else:
+                logging.warning("index.pkl data format is unexpected.")
 
+            st.session_state.simple_available_files = sorted(list(filenames))
+            logging.info(f"Extracted {len(filenames)} filenames from index.pkl.")
+
+        except Exception as e:
+            logging.exception("Failed to parse index.pkl for file list.")
+            st.session_state.simple_available_files = []
+    else:
+        logging.warning(f"index.pkl not found at {index_pkl_path}.")
+        st.session_state.simple_available_files = []
+        
 # --- UI: Sidebar ---
 with st.sidebar:
     st.header("Settings")
