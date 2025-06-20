@@ -36,6 +36,8 @@ dependencies = [
     "pydantic>=2.11.3",
     "boto3>=1.38.18",
     "uvicorn>=0.34.2", 
+    "pytesseract>=0.3.10",
+    "Pillow>=10.0.0",
     
 ]
 

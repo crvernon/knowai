@@ -26,7 +26,7 @@ By default, this will create a vectorstore using FAISS named "test_faiss_store" 
 ### Running the knowai in a simple chatbot example via streamlit
 From the root directory, run the following in a terminal after you have your virtual environment active:  
 
-`streamlit run app_chat_simple.py`
+`streamlit run example_apps/streamlit/app_chat_simple.py`
 
 This will open the app in your default browser.
 
