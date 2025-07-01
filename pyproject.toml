@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "knowai"
-version = "0.2.2"
+version = "0.2.3"
 license = {file = "LICENSE"}
 authors = [
   { name="Chris R. Vernon", email="chris.vernon@pnnl.gov" },
