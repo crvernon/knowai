@@ -24,6 +24,48 @@ N_QUERY_ALTERNATIVES_DEFAULT = 1
 logger = logging.getLogger(__name__)
 
 
+def get_workflow_mermaid_diagram(save_to_file: Optional[str] = None) -> str:
+    """
+    Generate a Mermaid diagram representation of the KnowAI LangGraph workflow.
+    
+    This is a standalone function that creates a temporary graph instance
+    to generate the diagram without needing a full KnowAIAgent instance.
+    
+    Parameters
+    ----------
+    save_to_file : Optional[str], default None
+        If provided, save the Mermaid diagram to the specified file path.
+        
+    Returns
+    -------
+    str
+        Mermaid diagram string that can be rendered in any Mermaid-compatible viewer.
+        
+    Examples
+    --------
+    >>> from knowai.core import get_workflow_mermaid_diagram
+    >>> diagram = get_workflow_mermaid_diagram()
+    >>> print(diagram)
+    
+    # Save to file
+    >>> get_workflow_mermaid_diagram(save_to_file="workflow.md")
+    """
+    graph_app = create_graph_app()
+    mermaid_diagram = graph_app.get_graph().draw_mermaid()
+    
+    if save_to_file:
+        try:
+            with open(save_to_file, 'w') as f:
+                f.write("```mermaid\n")
+                f.write(mermaid_diagram)
+                f.write("\n```\n")
+            logging.info(f"Mermaid diagram saved to: {save_to_file}")
+        except Exception as e:
+            logging.error(f"Failed to save Mermaid diagram to {save_to_file}: {e}")
+    
+    return mermaid_diagram
+
+
 class KnowAIAgent:
     """
     Conversational Retrieval‑Augmented Generation (RAG) agent built on a
@@ -31,7 +73,7 @@ class KnowAIAgent:
 
     The agent owns a compiled LangGraph *graph_app* and a mutable
     ``session_state`` that flows through the graph.  It exposes
-    :pyfunc:`process_turn`, which takes the user’s question plus optional
+    :pyfunc:`process_turn`, which takes the user's question plus optional
     UI parameters, executes the LangGraph asynchronously, updates
     conversation history, and returns structured results for display.
 
@@ -120,6 +162,43 @@ class KnowAIAgent:
         
         logging.info("KnowAIAgent initialized. Component loading will occur on the first 'process_turn' call.")
 
+    def get_graph_mermaid(self, save_to_file: Optional[str] = None) -> str:
+        """
+        Generate a Mermaid diagram representation of the LangGraph workflow.
+        
+        Parameters
+        ----------
+        save_to_file : Optional[str], default None
+            If provided, save the Mermaid diagram to the specified file path.
+            
+        Returns
+        -------
+        str
+            Mermaid diagram string that can be rendered in any Mermaid-compatible viewer.
+            
+        Examples
+        --------
+        >>> agent = KnowAIAgent("path/to/vectorstore")
+        >>> mermaid_diagram = agent.get_graph_mermaid()
+        >>> print(mermaid_diagram)
+        
+        # Save to file
+        >>> agent.get_graph_mermaid(save_to_file="workflow_diagram.md")
+        """
+        mermaid_diagram = self.graph_app.get_graph().draw_mermaid()
+        
+        if save_to_file:
+            try:
+                with open(save_to_file, 'w') as f:
+                    f.write("```mermaid\n")
+                    f.write(mermaid_diagram)
+                    f.write("\n```\n")
+                logging.info(f"Mermaid diagram saved to: {save_to_file}")
+            except Exception as e:
+                logging.error(f"Failed to save Mermaid diagram to {save_to_file}: {e}")
+        
+        return mermaid_diagram
+
     async def process_turn(
         self,
         user_question: Optional[str] = None,
@@ -128,10 +207,31 @@ class KnowAIAgent:
         n_alternatives_override: Optional[int] = None,
         k_per_query_override: Optional[int] = None,
         progress_cb: Optional[Callable[[str, str, Dict[str, Any]], None]] = None,
-        detailed_response_desired: Optional[bool] = None
+        detailed_response_desired: Optional[bool] = None,
+        streaming_callback: Optional[Callable[[str], None]] = None
     ) -> Dict[str, Any]:
         """
         Processes a single conversational turn.
+
+        Parameters
+        ----------
+        user_question : Optional[str]
+            The user's question to process.
+        selected_files : Optional[List[str]]
+            List of files to search in.
+        bypass_individual_gen : bool
+            Whether to skip individual file answer generation.
+        n_alternatives_override : Optional[int]
+            Override for number of alternative queries.
+        k_per_query_override : Optional[int]
+            Override for chunks per query.
+        progress_cb : Optional[Callable[[str, str, Dict[str, Any]], None]]
+            Progress callback for node-level updates.
+        detailed_response_desired : Optional[bool]
+            Whether to use detailed (large) or simple (small) LLM.
+        streaming_callback : Optional[Callable[[str], None]]
+            Callback function to stream tokens as they're generated.
+            If provided, the final LLM response will be streamed in real-time.
 
         Returns:
             A dictionary containing:
@@ -146,6 +246,7 @@ class KnowAIAgent:
         self.session_state["allowed_files"] = selected_files
         self.session_state["bypass_individual_generation"] = bypass_individual_gen
         self.session_state["__progress_cb__"] = progress_cb
+        self.session_state["streaming_callback"] = streaming_callback
         if detailed_response_desired is not None:
             self.session_state["detailed_response_desired"] = detailed_response_desired
         

@@ -7,7 +7,7 @@ import asyncio
 import logging
 import os
 import time 
-from typing import List, TypedDict, Dict, Optional, Union
+from typing import List, TypedDict, Dict, Optional, Union, Callable
 
 from langchain_community.vectorstores import FAISS
 from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
@@ -58,7 +58,7 @@ class GraphState(TypedDict):
     allowed_files : Optional[List[str]]
         Filenames selected by the user for the current question.
     question : Optional[str]
-        The user’s current question.
+        The user's current question.
     documents_by_file : Optional[Dict[str, List[Document]]]
         Mapping of filenames to the list of retrieved document chunks.
     individual_answers : Optional[Dict[str, str]]
@@ -102,7 +102,10 @@ class GraphState(TypedDict):
     k_chunks_retriever: int
     k_chunks_retriever_all_docs: int
     combine_threshold: int
-    max_tokens_individual_answer: int 
+    max_tokens_individual_answer: int
+    generated_queries: Optional[List[str]]
+    query_embeddings: Optional[List[List[float]]]
+    streaming_callback: Optional[Callable[[str], None]] 
 
 def _is_content_policy_error(e: Exception) -> bool:
     """
@@ -448,37 +451,121 @@ async def _async_retrieve_docs_with_embeddings_for_file(
         return file_name, None
 
 
+async def generate_multi_queries_node(state: GraphState) -> GraphState:
+    """
+    Generate alternative queries for the user's question using MultiQueryRetriever.
+    
+    This node uses the MultiQueryRetriever to generate alternative phrasings
+    of the user's question to improve document retrieval. The generated queries
+    are stored in the state for use by downstream nodes.
+    
+    Parameters
+    ----------
+    state : GraphState
+        Current mutable graph state. Expected to contain the keys
+        ``question``, ``llm_small``, ``retriever``, and ``n_alternatives``.
+        
+    Returns
+    -------
+    GraphState
+        Updated state containing ``generated_queries`` and ``query_embeddings``.
+    """
+    t_node_start = time.perf_counter()
+    node_name = "generate_multi_queries_node"
+    logging.info(f"--- Starting Node: {node_name} (Async) ---")
+    
+    question = state.get("question")
+    llm_small = state.get("llm_small")
+    base_retriever = state.get("retriever")
+    n_alternatives = state.get("n_alternatives", 4)
+    embeddings_model = state.get("embeddings")
+    
+    # Initialize with original question
+    query_list: List[str] = [question] if question else []
+    query_embeddings_list: List[List[float]] = []
+    
+    if not question:
+        logging.info(f"[{node_name}] No question provided. Skipping query generation.")
+        return {**state, "generated_queries": query_list, "query_embeddings": query_embeddings_list}
+    
+    if not all([llm_small, base_retriever, embeddings_model]):
+        logging.error(f"[{node_name}] Missing components for query generation. Using original question only.")
+        return {**state, "generated_queries": query_list, "query_embeddings": query_embeddings_list}
+    
+    try:
+        logging.info(f"[{node_name}] Generating alternative queries...")
+        
+        mqr_llm_chain = MultiQueryRetriever.from_llm(retriever=base_retriever, llm=llm_small).llm_chain
+        
+        llm_response = await mqr_llm_chain.ainvoke({"question": question})
+        raw_queries_text = ""
+        
+        if isinstance(llm_response, dict):
+            raw_queries_text = str(llm_response.get(mqr_llm_chain.output_key, ""))
+        elif isinstance(llm_response, str):
+            raw_queries_text = llm_response
+        elif isinstance(llm_response, list):
+            raw_queries_text = "\n".join(str(item).strip() for item in llm_response if isinstance(item, str) and str(item).strip())
+        else:
+            raw_queries_text = str(llm_response)
+        
+        alt_queries = [q.strip() for q in raw_queries_text.split("\n") if q.strip()]
+        query_list.extend(list(dict.fromkeys(alt_queries))[:n_alternatives])
+        
+        logging.info(f"[{node_name}] Generated {len(query_list)} total unique queries.")
+        
+    except Exception as e_query_gen:
+        if _is_content_policy_error(e_query_gen):
+            logging.warning(f"[{node_name}] Content policy violation during query generation. Using original question only. Error: {e_query_gen}")
+        else:
+            logging.exception(f"[{node_name}] Failed to generate alt queries: {e_query_gen}")
+        # In both cases, we fall back to the original question
+    
+    # Generate embeddings for all queries
+    try:
+        logging.info(f"[{node_name}] Embedding {len(query_list)} queries...")
+        query_embeddings_list = await embeddings_model.aembed_documents(query_list)
+    except Exception as e_embed:
+        logging.exception(f"[{node_name}] Failed to embed queries: {e_embed}")
+        query_embeddings_list = []
+    
+    if not query_embeddings_list or len(query_embeddings_list) != len(query_list):
+        logging.error(f"[{node_name}] Query embedding failed/mismatched. Using empty embeddings.")
+        query_embeddings_list = []
+    
+    duration_node = time.perf_counter() - t_node_start
+    logging.info(f"--- Node: {node_name} finished in {duration_node:.4f} seconds ---")
+    
+    return {
+        **state,
+        "generated_queries": query_list,
+        "query_embeddings": query_embeddings_list
+    }
+
+
 async def extract_documents_parallel_node(state: GraphState) -> GraphState:
     """
     Extract relevant document chunks in parallel for each user‑selected file.
 
     The node performs the following steps:
 
-    1. Generate alternative queries for the user’s question with a large
-       language model (via :pyclass:`langchain.retrievers.MultiQueryRetriever`)
-       up to ``n_alternatives`` variants.
-    2. Embed each query using the embeddings model stored in ``state``.
-    3. For every file in ``state['allowed_files']`` retrieve the top
+    1. Uses pre-generated queries and embeddings from the multi-query generation node.
+    2. For every file in ``state['allowed_files']`` retrieve the top
        ``k_per_query`` chunks per query embedding from the FAISS vector
        store with an asynchronous similarity search.
-    4. Deduplicate retrieved chunks per file.
-    5. Store the resulting mapping in ``state['documents_by_file']``.
+    3. Deduplicate retrieved chunks per file.
+    4. Store the resulting mapping in ``state['documents_by_file']``.
 
     If any required component (question, allowed files, vector store,
-    embeddings, retriever, or LLM) is missing, the function returns early
+    retriever, generated queries, or query embeddings) is missing, the function returns early
     with an empty ``documents_by_file`` dictionary.
 
     Parameters
     ----------
     state : GraphState
         Current mutable graph state. Expected to contain the keys
-        ``question``, 
-        ``llm_large``, 
-        ``llm_small``, 
-        ``retriever``, 
-        ``vectorstore``,
-        ``embeddings``, 
-        ``allowed_files``.
+        ``question``, ``vectorstore``, ``allowed_files``,
+        ``generated_queries``, and ``query_embeddings``.
 
     Returns
     -------
@@ -490,91 +577,42 @@ async def extract_documents_parallel_node(state: GraphState) -> GraphState:
     t_node_start = time.perf_counter()
     node_name = "extract_documents_node"
     logging.info(f"--- Starting Node: {node_name} (Async) ---")
-    question, llm_large, llm_small, base_retriever, vectorstore, embeddings_model, allowed_files = (
-        state.get("question"), 
-        state.get("llm_large"), 
-        state.get("llm_small"),
-        state.get("retriever"),
-        state.get("vectorstore"), 
-        state.get("embeddings"), 
-        state.get("allowed_files")
-    )
-
-    n_alternatives = state.get("n_alternatives", 4)
+    question = state.get("question")
+    base_retriever = state.get("retriever")
+    vectorstore = state.get("vectorstore")
+    allowed_files = state.get("allowed_files")
     k_per_query = state.get("k_chunks_retriever")
     k_retriever_all_docs = state.get("k_chunks_retriever_all_docs")
+    query_list = state.get("generated_queries")
+    query_embeddings_list = state.get("query_embeddings")
     current_documents_by_file: Dict[str, List[Document]] = {}
 
-    if not question: 
+    if not question:
         logging.info(f"[{node_name}] No question. Skipping extraction.")
         return {**state, "documents_by_file": current_documents_by_file}
-    
-    if not allowed_files: 
+    if not allowed_files:
         logging.info(f"[{node_name}] No files selected. Skipping extraction.")
         return {**state, "documents_by_file": current_documents_by_file}
-    
-    if not all([llm_large, llm_small, base_retriever, vectorstore, embeddings_model]):
+    if not all([base_retriever, vectorstore, query_list, query_embeddings_list]):
         logging.error(f"[{node_name}] Missing components for extraction. Halting.")
         return {**state, "documents_by_file": current_documents_by_file}
-
-    query_list: List[str] = [question]
-    try:
-        logging.info(f"[{node_name}] Generating alternative queries...")
-
-        mqr_llm_chain = MultiQueryRetriever.from_llm(retriever=base_retriever, llm=llm_small).llm_chain
-
-        llm_response = await mqr_llm_chain.ainvoke({"question": question})
-        raw_queries_text = ""
-        if isinstance(llm_response, dict): 
-            raw_queries_text = str(llm_response.get(mqr_llm_chain.output_key, ""))
-
-        elif isinstance(llm_response, str): 
-            raw_queries_text = llm_response
-
-        elif isinstance(llm_response, list): 
-            raw_queries_text = "\n".join(str(item).strip() for item in llm_response if isinstance(item, str) and str(item).strip())
-
-        else: 
-            raw_queries_text = str(llm_response)
-        
-        alt_queries = [q.strip() for q in raw_queries_text.split("\n") if q.strip()]
-        query_list.extend(list(dict.fromkeys(alt_queries))[:n_alternatives])
-
-        logging.info(f"[{node_name}] Generated {len(query_list)} total unique queries.")
-
-    except Exception as e_query_gen:
-        if _is_content_policy_error(e_query_gen):
-            logging.warning(f"[{node_name}] Content policy violation during query generation. Using original question only. Error: {e_query_gen}")
-            # query_list is already initialized with the original question
-        else:
-            logging.exception(f"[{node_name}] Failed to generate alt queries: {e_query_gen}")
-        # In both cases (policy or other error), we fall back to the original question if query_list isn't populated beyond it.
-
-    query_embeddings_list: List[List[float]] = []
-    try:
-        logging.info(f"[{node_name}] Embedding {len(query_list)} queries...")
-        query_embeddings_list = await embeddings_model.aembed_documents(query_list) 
-    except Exception as e_embed: 
-        logging.exception(f"[{node_name}] Failed to embed queries: {e_embed}")
-        return {**state, "documents_by_file": current_documents_by_file}
-    
-    if not query_embeddings_list or len(query_embeddings_list) != len(query_list):
-        logging.error(f"[{node_name}] Query embedding failed/mismatched.")
+    if len(query_list) != len(query_embeddings_list):
+        logging.error(f"[{node_name}] Mismatch between number of queries and embeddings. Halting.")
         return {**state, "documents_by_file": current_documents_by_file}
 
     tasks = [
         _async_retrieve_docs_with_embeddings_for_file(
-            vectorstore, 
-            f_name, 
-            query_embeddings_list, 
-            query_list, 
+            vectorstore,
+            f_name,
+            query_embeddings_list,
+            query_list,
             k_per_query,
             k_retriever_all_docs
-        ) for f_name in allowed_files 
+        ) for f_name in allowed_files
     ]
     if tasks:
         results = await asyncio.gather(*tasks)
-        for f_name, docs in results: 
+        for f_name, docs in results:
             current_documents_by_file[f_name] = docs if docs else []
         # Build a flattened list of all docs across files
         combined_docs_list: List[Document] = []
@@ -603,13 +641,13 @@ async def generate_individual_answers_node(state: GraphState) -> GraphState:
     file it constructs a prompt that:
 
     * Presents the file‑specific context chunks.
-    * Asks the large language model (LLM) to answer the user’s question
+    * Asks the large language model (LLM) to answer the user's question
       **solely** from that context.
     * Requires inline citations in the form
       ``"quoted text…" (filename, Page X)``.
 
     Answers are generated asynchronously to improve latency.  If a file has
-    no retrieved chunks, a default “no relevant information” message is
+    no retrieved chunks, a default "no relevant information" message is
     stored.  Content‑policy violations or other LLM errors are caught and
     logged; the corresponding answer is set to a predefined policy message
     or a generic error explanation.
@@ -719,7 +757,7 @@ def format_raw_documents_for_synthesis_node(state: GraphState) -> GraphState:
 
     The assembled text for *all* files is saved under the
     ``raw_documents_for_synthesis`` key so that the synthesis LLM can
-    answer the user’s question when individual‑file generation is
+    answer the user's question when individual‑file generation is
     bypassed.
 
     If no documents were retrieved for the selected files, or if no files
@@ -819,10 +857,10 @@ async def _async_combine_answer_chunk(
     *combination_prompt_template* and invokes *llm_combiner* to produce a
     unified chunk of text. It supports two modes:
 
-    * **Processed‑answers mode** (`is_raw_chunk=False`) – *answer_chunk_input*
+    * **Processed‑answers mode** (`is_raw_chunk=False`) – *answer_chunk_input*
       is a mapping from filename to the answer previously generated for
       that file.
-    * **Raw‑chunk mode** (`is_raw_chunk=True`) – *answer_chunk_input* is the
+    * **Raw‑chunk mode** (`is_raw_chunk=True`) – *answer_chunk_input* is the
       raw text extracted from documents, already concatenated for prompt
       injection.
 
@@ -835,7 +873,7 @@ async def _async_combine_answer_chunk(
     Parameters
     ----------
     question : str
-        The user’s current question.
+        The user's current question.
     answer_chunk_input : Union[Dict[str, str], str]
         Answers dictionary (processed mode) or raw text block (raw‑chunk
         mode).
@@ -896,6 +934,77 @@ async def _async_combine_answer_chunk(
         return f"Error combining chunk {chunk_name}. Content:\n" + formatted_chunk_content_for_prompt
 
 
+async def _stream_final_generation(
+    question: str,
+    content_llm: str,
+    llm_instance: BaseLanguageModel,
+    combo_prompt: PromptTemplate,
+    conversation_history_str: str,
+    no_info_list: List[str],
+    error_list: List[str],
+    streaming_callback: Optional[Callable[[str], None]]
+) -> str:
+    """
+    Stream the final generation using the LLM with a callback for real-time updates.
+    
+    Parameters
+    ----------
+    question : str
+        The user's question.
+    content_llm : str
+        The content to synthesize.
+    llm_instance : BaseLanguageModel
+        The LLM instance to use for generation.
+    combo_prompt : PromptTemplate
+        The prompt template for synthesis.
+    conversation_history_str : str
+        Formatted conversation history.
+    no_info_list : List[str]
+        List of files with no relevant information.
+    error_list : List[str]
+        List of files with errors.
+    streaming_callback : Optional[Callable[[str], None]]
+        Callback function to stream tokens as they're generated.
+        
+    Returns
+    -------
+    str
+        The complete generated response.
+    """
+    try:
+        # Create the streaming chain
+        chain = combo_prompt | llm_instance | StrOutputParser()
+        
+        # Prepare the input
+        input_data = {
+            "question": question,
+            "formatted_answers_or_raw_docs": content_llm,
+            "files_no_info": ", ".join(no_info_list) if no_info_list else "None",
+            "files_errors": ", ".join(error_list) if error_list else "None",
+            "conversation_history": conversation_history_str
+        }
+        
+        if streaming_callback:
+            # Use streaming if callback is provided
+            full_response = ""
+            async for chunk in chain.astream(input_data):
+                if chunk:
+                    full_response += chunk
+                    streaming_callback(chunk)
+            return full_response
+        else:
+            # Use regular invocation if no streaming callback
+            return await chain.ainvoke(input_data)
+            
+    except Exception as e:
+        if _is_content_policy_error(e):
+            logging.warning(f"Content policy violation during streaming generation: {e}")
+            return CONTENT_POLICY_MESSAGE
+        else:
+            logging.exception(f"Error during streaming generation: {e}")
+            return f"Generation error: {e}. Content: {content_llm[:200]}..."
+
+
 async def combine_answers_node(state: GraphState) -> GraphState:
     """
     Synthesize a final answer for the user by combining individual file‑
@@ -904,9 +1013,9 @@ async def combine_answers_node(state: GraphState) -> GraphState:
     The node supports two workflows controlled by
     ``state['bypass_individual_generation']``:
 
-    * **Standard mode** (`bypass_individual_generation=False`) – Combine the
+    * **Standard mode** (`bypass_individual_generation=False`) – Combine the
       pre‑processed answers stored in ``state['individual_answers']``.
-    * **Bypass mode** (`bypass_individual_generation=True`) – Skip individual
+    * **Bypass mode** (`bypass_individual_generation=True`) – Skip individual
       answers and instead combine the raw document text assembled in
       ``state['raw_documents_for_synthesis']``.
 
@@ -916,7 +1025,7 @@ async def combine_answers_node(state: GraphState) -> GraphState:
     followed by a final synthesis step. Content‑policy violations are
     propagated using the global :data:`CONTENT_POLICY_MESSAGE`.
 
-    Error and “no‑info” conditions are tracked per file and injected back
+    Error and "no‑info" conditions are tracked per file and injected back
     into the final prompt so that the LLM can acknowledge gaps or issues.
 
     Parameters
@@ -956,12 +1065,6 @@ async def combine_answers_node(state: GraphState) -> GraphState:
 
         detailed_flag = state.get("detailed_response_desired", True)    
         llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
-
-        # llm_instance = AzureChatOpenAI(
-        #     temperature=0.0, 
-        #     api_version=os.getenv("AZURE_OPENAI_API_4p1_VERSION"),
-        #     azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NANO"),
-        # )
         
         prompt_processed = """You are an expert synthesis assistant. Combine PRE-PROCESSED answers.
 Conversation History: {conversation_history}
@@ -1070,21 +1173,20 @@ Synthesized Answer from RAW Docs:"""
                                 if error_chunks: error_list.append(f"{len(error_chunks)} intermediate chunk(s) had errors.")
         
         if content_llm and (output_generation == "Error during synthesis." or (ans_to_combine if not bypass_flag else True)):
-            try:
-                final_chain = combo_prompt | llm_instance | StrOutputParser()
-                output_generation = await final_chain.ainvoke({
-                    "question": question, "formatted_answers_or_raw_docs": content_llm,
-                    "files_no_info": ", ".join(no_info_list) if no_info_list else "None",
-                    "files_errors": ", ".join(error_list) if error_list else "None", # error_list now includes policy issues
-                    "conversation_history": conversation_history_str
-                })
-            except Exception as e:
-                if _is_content_policy_error(e):
-                    logging.warning(f"Content policy violation during final combination: {e}")
-                    output_generation = CONTENT_POLICY_MESSAGE
-                else:
-                    logging.exception(f"[{node_name}] Final combination LLM error: {e}")
-                    output_generation = f"Final synthesis error: {e}. Content: {content_llm[:200]}..."
+            # Get streaming callback from state
+            streaming_callback = state.get("streaming_callback")
+            
+            # Use streaming generation
+            output_generation = await _stream_final_generation(
+                question=question,
+                content_llm=content_llm,
+                llm_instance=llm_instance,
+                combo_prompt=combo_prompt,
+                conversation_history_str=conversation_history_str,
+                no_info_list=no_info_list,
+                error_list=error_list,
+                streaming_callback=streaming_callback
+            )
         
     state_to_return["generation"] = output_generation
     duration_node = time.perf_counter() - t_node_start
@@ -1098,7 +1200,7 @@ def decide_processing_path_after_extraction(state: GraphState) -> str:
 
     The choice depends on three pieces of information stored in *state*:
 
-    * ``question`` – the user’s current question.
+    * ``question`` – the user's current question.
     * ``allowed_files`` – the list of filenames selected by the user.
     * ``bypass_individual_generation`` – ``True`` when individual‑file
       answer generation should be skipped.
@@ -1148,9 +1250,10 @@ def create_graph_app() -> Graph:
     perform each stage of the question‑answer pipeline:
 
     1. Instantiate embeddings, LLM, vector store, and retriever.
-    2. Extract document chunks relevant to the user’s question.
-    3. Optionally format raw documents or generate per‑file answers.
-    4. Combine answers (or raw text) into a final synthesized response.
+    2. Generate multi-queries for the user's question.
+    3. Extract document chunks relevant to the user's question.
+    4. Optionally format raw documents or generate per‑file answers.
+    5. Combine answers (or raw text) into a final synthesized response.
 
     Conditional routing after document extraction is decided by
     :pyfunc:`decide_processing_path_after_extraction`.
@@ -1167,6 +1270,7 @@ def create_graph_app() -> Graph:
     workflow.add_node("instantiate_llm_small_node", instantiate_llm_small)
     workflow.add_node("load_vectorstore_node", load_faiss_vectorstore)
     workflow.add_node("instantiate_retriever_node", instantiate_retriever)
+    workflow.add_node("generate_multi_queries_node", generate_multi_queries_node)
     workflow.add_node("extract_documents_node", extract_documents_parallel_node)
     workflow.add_node("format_raw_documents_node", format_raw_documents_for_synthesis_node) 
     workflow.add_node("generate_answers_node", generate_individual_answers_node) 
@@ -1177,7 +1281,8 @@ def create_graph_app() -> Graph:
     workflow.add_edge("instantiate_llm_large_node", "instantiate_llm_small_node")
     workflow.add_edge("instantiate_llm_small_node", "load_vectorstore_node")
     workflow.add_edge("load_vectorstore_node", "instantiate_retriever_node")
-    workflow.add_edge("instantiate_retriever_node", "extract_documents_node")
+    workflow.add_edge("instantiate_retriever_node", "generate_multi_queries_node")
+    workflow.add_edge("generate_multi_queries_node", "extract_documents_node")
     workflow.add_conditional_edges(
         "extract_documents_node",
         decide_processing_path_after_extraction,
