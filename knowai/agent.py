@@ -18,7 +18,8 @@ from langchain_core.vectorstores import VectorStoreRetriever
 from langchain_core.embeddings import Embeddings as LangchainEmbeddings
 from langchain_core.prompts import PromptTemplate 
 from langchain_core.output_parsers import StrOutputParser 
-from langgraph.graph import StateGraph, END, Graph
+from langgraph.graph import StateGraph, END
+from langgraph.graph.state import CompiledStateGraph as Graph
 
 
 # Content Policy Error Handling
