@@ -21,9 +21,15 @@ from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph as Graph
 
+from .prompts import (
+    INDIVIDUAL_ANSWER_TEMPLATE,
+    get_synthesis_prompt_template,
+    CONTENT_POLICY_MESSAGE,
+    get_progress_message
+)
 
-# Content Policy Error Handling
-CONTENT_POLICY_MESSAGE = "Due to content management policy issues with the AI provider, we are not able to provide a response to this topic. Please rephrase your question and try again."
+
+# Content Policy Error Handling - moved to prompts.py
 
 
 # Fetch Azure credentials from environment variables (loaded by core.py)
@@ -164,7 +170,7 @@ def instantiate_embeddings(state: GraphState) -> GraphState:
     # Update progress callback if available
     progress_cb = state.get("__progress_cb__")
     if progress_cb:
-        progress_cb("Setting up AI models...", "info", {"node": node_name, "stage": "initialization"})
+        progress_cb(get_progress_message("initialization", node_name), "info", {"node": node_name, "stage": "initialization"})
     
     if not state.get("embeddings"):
         logging.info("Instantiating embeddings model")
@@ -216,7 +222,7 @@ def instantiate_llm_large(state: GraphState) -> GraphState:
     # Update progress callback if available
     progress_cb = state.get("__progress_cb__")
     if progress_cb:
-        progress_cb("Initializing language models...", "info", {"node": node_name, "stage": "initialization"})
+        progress_cb(get_progress_message("initialization", node_name), "info", {"node": node_name, "stage": "initialization"})
     
     if not state.get("llm_large"):
     
@@ -268,7 +274,7 @@ def instantiate_llm_small(state: GraphState) -> GraphState:
     # Update progress callback if available
     progress_cb = state.get("__progress_cb__")
     if progress_cb:
-        progress_cb("Setting up query generation models...", "info", {"node": node_name, "stage": "initialization"})
+        progress_cb(get_progress_message("initialization", node_name), "info", {"node": node_name, "stage": "initialization"})
     
     if not state.get("llm_small"):
     
@@ -321,7 +327,7 @@ def load_faiss_vectorstore(state: GraphState) -> GraphState:
     # Update progress callback if available
     progress_cb = state.get("__progress_cb__")
     if progress_cb:
-        progress_cb("Loading document database...", "info", {"node": node_name, "stage": "initialization"})
+        progress_cb(get_progress_message("initialization", node_name), "info", {"node": node_name, "stage": "initialization"})
     
     current_vectorstore_path = state.get("vectorstore_path") 
     embeddings = state.get("embeddings")
@@ -384,7 +390,7 @@ def instantiate_retriever(state: GraphState) -> GraphState:
     # Update progress callback if available
     progress_cb = state.get("__progress_cb__")
     if progress_cb:
-        progress_cb("Setting up document search engine...", "info", {"node": node_name, "stage": "initialization"})
+        progress_cb(get_progress_message("initialization", node_name), "info", {"node": node_name, "stage": "initialization"})
     
     if "retriever" not in state: 
         state["retriever"] = None
@@ -507,7 +513,7 @@ async def generate_multi_queries_node(state: GraphState) -> GraphState:
     # Update progress callback if available
     progress_cb = state.get("__progress_cb__")
     if progress_cb:
-        progress_cb("Generating search queries...", "info", {"node": node_name, "stage": "query_generation"})
+        progress_cb(get_progress_message("query_generation", node_name), "info", {"node": node_name, "stage": "query_generation"})
     
     question = state.get("question")
     llm_small = state.get("llm_small")
@@ -616,7 +622,7 @@ async def extract_documents_parallel_node(state: GraphState) -> GraphState:
     # Update progress callback if available
     progress_cb = state.get("__progress_cb__")
     if progress_cb:
-        progress_cb("Searching documents for relevant information...", "info", {"node": node_name, "stage": "document_retrieval"})
+        progress_cb(get_progress_message("document_retrieval", node_name), "info", {"node": node_name, "stage": "document_retrieval"})
     
     question = state.get("question")
     base_retriever = state.get("retriever")
@@ -716,7 +722,7 @@ async def generate_individual_answers_node(state: GraphState) -> GraphState:
     # Update progress callback if available
     progress_cb = state.get("__progress_cb__")
     if progress_cb:
-        progress_cb("Generating answers for each document...", "info", {"node": node_name, "stage": "answer_generation"})
+        progress_cb(get_progress_message("answer_generation", node_name), "info", {"node": node_name, "stage": "answer_generation"})
     
     question = state.get("question")
     documents_by_file = state.get("documents_by_file")
@@ -732,21 +738,11 @@ async def generate_individual_answers_node(state: GraphState) -> GraphState:
     if not question: logging.info(f"[{node_name}] No question. Skipping.")
     elif not documents_by_file: logging.info(f"[{node_name}] No 'documents_by_file'. Skipping.")
     else:
-        prompt_text = """You are an expert assistant. Answer the user's question based ONLY on the provided context from a SINGLE FILE.
-Context from File '{filename}' (Chunks from Pages X, Y, Z...):
-{context}
-Question: {question}
-Detailed Answer (with citations like "quote..." ({filename}, Page X)):"""
-        prompt_template = PromptTemplate(template=prompt_text, input_variables=["context", "question", "filename"])
+        # Use centralized prompt template
+        prompt_template = INDIVIDUAL_ANSWER_TEMPLATE
 
-        # llm = state.get("llm_large")
         llm = state.get("llm_small")
-        # llm = AzureChatOpenAI(
-        #     temperature=0.1, 
-        #     api_version=os.getenv("AZURE_OPENAI_API_4p1_VERSION"),
-        #     azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
-        #     max_tokens=state.get("max_tokens_individual_answer")
-        # )
+
         chain = prompt_template | llm | StrOutputParser()
         
         async def _gen_ans(fname: str, fdocs: List[Document], q: str) -> tuple[str, str]:
@@ -829,7 +825,7 @@ def format_raw_documents_for_synthesis_node(state: GraphState) -> GraphState:
     # Update progress callback if available
     progress_cb = state.get("__progress_cb__")
     if progress_cb:
-        progress_cb("Preparing documents for analysis...", "info", {"node": node_name, "stage": "document_preparation"})
+        progress_cb(get_progress_message("document_preparation", node_name), "info", {"node": node_name, "stage": "document_preparation"})
     
     documents_by_file = state.get("documents_by_file")
     allowed_files = state.get("allowed_files") if state.get("allowed_files") is not None else []
@@ -1100,7 +1096,7 @@ async def combine_answers_node(state: GraphState) -> GraphState:
     # Update progress callback if available
     progress_cb = state.get("__progress_cb__")
     if progress_cb:
-        progress_cb("Synthesizing final response...", "info", {"node": node_name, "stage": "synthesis"})
+        progress_cb(get_progress_message("synthesis", node_name), "info", {"node": node_name, "stage": "synthesis"})
 
     question, individual_answers, allowed_files, conversation_history, bypass_flag, raw_docs_for_synthesis = (
         state.get("question"), 
@@ -1122,35 +1118,8 @@ async def combine_answers_node(state: GraphState) -> GraphState:
         detailed_flag = state.get("detailed_response_desired", True)    
         llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
         
-        prompt_processed = """You are an expert synthesis assistant. Combine PRE-PROCESSED answers.
-Conversation History: {conversation_history}
-User's CURRENT Question: {question}
-Individual PRE-PROCESSED Answers: {formatted_answers_or_raw_docs}
-Files with No Relevant Info: {files_no_info}
-Files with Errors: {files_errors}
-Instructions: Synthesize, preserve details & citations (e.g., "quote..." (file.pdf, Page X)). Attribute. Structure. Handle contradictions. Acknowledge files with no info/errors.
-Synthesized Answer:"""
-
-        prompt_raw = """You are an expert AI assistant. Answer CURRENT question based ONLY on RAW text chunks.
-Conversation History: {conversation_history}
-User's CURRENT Question: {question}
-RAW Text Chunks: {formatted_answers_or_raw_docs}
-Files with No Relevant Info (no chunks extracted): {files_no_info}
-Files with Errors (extraction errors): {files_errors}
-Instructions: Read raw text. Answer ONLY from raw text. Quote with citations (e.g., "quote..." (file.pdf, Page X)). If info not found, state it. Structure logically.
-Synthesized Answer from RAW Docs:"""
-        
-        active_prompt_text = prompt_raw if bypass_flag else prompt_processed
-        combo_prompt = PromptTemplate(
-            template=active_prompt_text, 
-            input_variables=[
-                "question", 
-                "formatted_answers_or_raw_docs", 
-                "files_no_info", 
-                "files_errors", 
-                "conversation_history"
-            ]
-        )
+        # Use centralized prompt template
+        combo_prompt = get_synthesis_prompt_template(bypass_flag)
         
         no_info_list: List[str] = []
         error_list: List[str] = []
