@@ -160,6 +160,12 @@ def instantiate_embeddings(state: GraphState) -> GraphState:
     t_node_start = time.perf_counter()
     node_name = "instantiate_embeddings_node"
     logging.info(f"--- Starting Node: {node_name} ---")
+    
+    # Update progress callback if available
+    progress_cb = state.get("__progress_cb__")
+    if progress_cb:
+        progress_cb("Setting up AI models...", "info", {"node": node_name, "stage": "initialization"})
+    
     if not state.get("embeddings"):
         logging.info("Instantiating embeddings model")
         try:
@@ -206,6 +212,12 @@ def instantiate_llm_large(state: GraphState) -> GraphState:
     t_node_start = time.perf_counter()
     node_name = "instantiate_llm_large_node"
     logging.info(f"--- Starting Node: {node_name} (for query generation) ---")
+    
+    # Update progress callback if available
+    progress_cb = state.get("__progress_cb__")
+    if progress_cb:
+        progress_cb("Initializing language models...", "info", {"node": node_name, "stage": "initialization"})
+    
     if not state.get("llm_large"):
     
         try:
@@ -252,6 +264,12 @@ def instantiate_llm_small(state: GraphState) -> GraphState:
     t_node_start = time.perf_counter()
     node_name = "instantiate_llm_small_node"
     logging.info(f"--- Starting Node: {node_name} (for query generation) ---")
+    
+    # Update progress callback if available
+    progress_cb = state.get("__progress_cb__")
+    if progress_cb:
+        progress_cb("Setting up query generation models...", "info", {"node": node_name, "stage": "initialization"})
+    
     if not state.get("llm_small"):
     
         try:
@@ -299,6 +317,12 @@ def load_faiss_vectorstore(state: GraphState) -> GraphState:
     t_node_start = time.perf_counter()
     node_name = "load_vectorstore_node"
     logging.info(f"--- Starting Node: {node_name} ---")
+    
+    # Update progress callback if available
+    progress_cb = state.get("__progress_cb__")
+    if progress_cb:
+        progress_cb("Loading document database...", "info", {"node": node_name, "stage": "initialization"})
+    
     current_vectorstore_path = state.get("vectorstore_path") 
     embeddings = state.get("embeddings")
     
@@ -356,6 +380,12 @@ def instantiate_retriever(state: GraphState) -> GraphState:
     t_node_start = time.perf_counter()
     node_name = "instantiate_retriever_node"
     logging.info(f"--- Starting Node: {node_name} ---")
+    
+    # Update progress callback if available
+    progress_cb = state.get("__progress_cb__")
+    if progress_cb:
+        progress_cb("Setting up document search engine...", "info", {"node": node_name, "stage": "initialization"})
+    
     if "retriever" not in state: 
         state["retriever"] = None
     vectorstore = state.get("vectorstore")
@@ -474,6 +504,11 @@ async def generate_multi_queries_node(state: GraphState) -> GraphState:
     node_name = "generate_multi_queries_node"
     logging.info(f"--- Starting Node: {node_name} (Async) ---")
     
+    # Update progress callback if available
+    progress_cb = state.get("__progress_cb__")
+    if progress_cb:
+        progress_cb("Generating search queries...", "info", {"node": node_name, "stage": "query_generation"})
+    
     question = state.get("question")
     llm_small = state.get("llm_small")
     base_retriever = state.get("retriever")
@@ -577,6 +612,12 @@ async def extract_documents_parallel_node(state: GraphState) -> GraphState:
     t_node_start = time.perf_counter()
     node_name = "extract_documents_node"
     logging.info(f"--- Starting Node: {node_name} (Async) ---")
+    
+    # Update progress callback if available
+    progress_cb = state.get("__progress_cb__")
+    if progress_cb:
+        progress_cb("Searching documents for relevant information...", "info", {"node": node_name, "stage": "document_retrieval"})
+    
     question = state.get("question")
     base_retriever = state.get("retriever")
     vectorstore = state.get("vectorstore")
@@ -671,6 +712,11 @@ async def generate_individual_answers_node(state: GraphState) -> GraphState:
     t_node_start = time.perf_counter()
     node_name = "generate_answers_node"
     logging.info(f"--- Starting Node: {node_name} (Async) ---")
+    
+    # Update progress callback if available
+    progress_cb = state.get("__progress_cb__")
+    if progress_cb:
+        progress_cb("Generating answers for each document...", "info", {"node": node_name, "stage": "answer_generation"})
     
     question = state.get("question")
     documents_by_file = state.get("documents_by_file")
@@ -779,6 +825,11 @@ def format_raw_documents_for_synthesis_node(state: GraphState) -> GraphState:
     t_node_start = time.perf_counter()
     node_name = "format_raw_documents_for_synthesis_node"
     logging.info(f"--- Starting Node: {node_name} ---")
+    
+    # Update progress callback if available
+    progress_cb = state.get("__progress_cb__")
+    if progress_cb:
+        progress_cb("Preparing documents for analysis...", "info", {"node": node_name, "stage": "document_preparation"})
     
     documents_by_file = state.get("documents_by_file")
     allowed_files = state.get("allowed_files") if state.get("allowed_files") is not None else []
@@ -1045,6 +1096,11 @@ async def combine_answers_node(state: GraphState) -> GraphState:
     t_node_start = time.perf_counter()
     node_name = "combine_answers_node"
     logging.info(f"--- Starting Node: {node_name} (Async) ---")
+    
+    # Update progress callback if available
+    progress_cb = state.get("__progress_cb__")
+    if progress_cb:
+        progress_cb("Synthesizing final response...", "info", {"node": node_name, "stage": "synthesis"})
 
     question, individual_answers, allowed_files, conversation_history, bypass_flag, raw_docs_for_synthesis = (
         state.get("question"), 
