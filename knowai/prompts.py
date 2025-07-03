@@ -8,96 +8,34 @@ centralized for easy maintenance and customization.
 from langchain_core.prompts import PromptTemplate
 
 
-# Individual File Answer Generation Prompt
-INDIVIDUAL_ANSWER_PROMPT = """You are an expert assistant. Answer the user's question based ONLY on the provided context from a SINGLE FILE.
-Context from File '{filename}' (Chunks from Pages X, Y, Z...):
-{context}
-Question: {question}
-Detailed Answer (with citations like "quote..." ({filename}, Page X)):
-IMPORTANT: Always use the exact filename '{filename}' in citations, never use generic terms like "file.pdf"."""
-
-INDIVIDUAL_ANSWER_TEMPLATE = PromptTemplate(
-    template=INDIVIDUAL_ANSWER_PROMPT,
-    input_variables=["context", "question", "filename"]
+# Synthesis Prompt for Raw Documents
+RAW_DOCUMENTS_SYNTHESIS_PROMPT = (
+    "You are an expert AI assistant. Answer CURRENT question based ONLY on RAW text chunks.\n"
+    "Conversation History: {conversation_history}\n"
+    "User's CURRENT Question: {question}\n"
+    "RAW Text Chunks: {formatted_answers_or_raw_docs}\n"
+    "Files with No Relevant Info (no chunks extracted): {files_no_info}\n"
+    "Files with Errors (extraction errors): {files_errors}\n"
+    "Instructions: Read raw text. Answer ONLY from raw text. Quote with citations. "
+    "IMPORTANT: Always use the exact filename from the source "
+    "(e.g., \"quote...\" (actual_filename.pdf, Page X)), never use generic terms like "
+    "\"file.pdf\". If info not found, clearly state which files had no relevant content. "
+    "Structure logically.\n"
+    "Synthesized Answer from RAW Docs:"
 )
 
 
-def get_individual_answer_template_for_model(is_nano_model: bool = False) -> PromptTemplate:
+def get_synthesis_prompt_template() -> PromptTemplate:
     """
-    Get the appropriate individual answer template based on the model type.
+    Get the synthesis prompt template for raw documents.
     
-    Parameters
-    ----------
-    is_nano_model : bool
-        Whether the model is a nano/small model that needs more explicit instructions
-        
     Returns
     -------
     PromptTemplate
-        The appropriate prompt template for individual answer generation
+        The prompt template for synthesis
     """
-    if is_nano_model:
-        # More explicit prompt for nano models
-        nano_prompt = """You are an expert assistant. Answer the user's question based ONLY on the provided context from a SINGLE FILE.
-Context from File '{filename}' (Chunks from Pages X, Y, Z...):
-{context}
-Question: {question}
-Detailed Answer (with citations like "quote..." ({filename}, Page X)):
-CRITICAL INSTRUCTIONS FOR NANO MODEL:
-1. ALWAYS use the exact filename '{filename}' in every citation
-2. NEVER use generic terms like "file.pdf", "document.pdf", or "the file"
-3. Format citations as: "quoted text..." ({filename}, Page X)
-4. The filename '{filename}' must appear exactly as shown in every citation"""
-        
-        return PromptTemplate(
-            template=nano_prompt,
-            input_variables=["context", "question", "filename"]
-        )
-    else:
-        return INDIVIDUAL_ANSWER_TEMPLATE
-
-
-# Synthesis Prompts
-PROCESSED_ANSWERS_SYNTHESIS_PROMPT = """You are an expert synthesis assistant. Combine PRE-PROCESSED answers.
-Conversation History: {conversation_history}
-User's CURRENT Question: {question}
-Individual PRE-PROCESSED Answers: {formatted_answers_or_raw_docs}
-Files with No Relevant Info: {files_no_info}
-Files with Errors: {files_errors}
-Instructions: Synthesize, preserve details & citations. IMPORTANT: Always use the exact filename from the source (e.g., "quote..." (actual_filename.pdf, Page X)), never use generic terms like "file.pdf". Attribute. Structure. Handle contradictions. Acknowledge files with no info/errors.
-Synthesized Answer:"""
-
-RAW_DOCUMENTS_SYNTHESIS_PROMPT = """You are an expert AI assistant. Answer CURRENT question based ONLY on RAW text chunks.
-Conversation History: {conversation_history}
-User's CURRENT Question: {question}
-RAW Text Chunks: {formatted_answers_or_raw_docs}
-Files with No Relevant Info (no chunks extracted): {files_no_info}
-Files with Errors (extraction errors): {files_errors}
-Instructions: Read raw text. Answer ONLY from raw text. Quote with citations. IMPORTANT: Always use the exact filename from the source (e.g., "quote..." (actual_filename.pdf, Page X)), never use generic terms like "file.pdf". If info not found, state it. Structure logically.
-Synthesized Answer from RAW Docs:"""
-
-
-def get_synthesis_prompt_template(bypass_individual_generation: bool) -> PromptTemplate:
-    """
-    Get the appropriate synthesis prompt template based on the processing mode.
-    
-    Parameters
-    ----------
-    bypass_individual_generation : bool
-        Whether to use raw documents mode (True) or processed answers mode (False)
-        
-    Returns
-    -------
-    PromptTemplate
-        The appropriate prompt template for synthesis
-    """
-    if bypass_individual_generation:
-        template = RAW_DOCUMENTS_SYNTHESIS_PROMPT
-    else:
-        template = PROCESSED_ANSWERS_SYNTHESIS_PROMPT
-    
     return PromptTemplate(
-        template=template,
+        template=RAW_DOCUMENTS_SYNTHESIS_PROMPT,
         input_variables=[
             "question", 
             "formatted_answers_or_raw_docs", 
@@ -109,7 +47,10 @@ def get_synthesis_prompt_template(bypass_individual_generation: bool) -> PromptT
 
 
 # Content Policy Error Message
-CONTENT_POLICY_MESSAGE = "Due to content management policy issues with the AI provider, we are not able to provide a response to this topic. Please rephrase your question and try again."
+CONTENT_POLICY_MESSAGE = (
+    "Due to content management policy issues with the AI provider, we are not able "
+    "to provide a response to this topic. Please rephrase your question and try again."
+)
 
 
 # Progress Messages for User Feedback
@@ -126,9 +67,6 @@ PROGRESS_MESSAGES = {
     },
     "document_retrieval": {
         "extraction": "Searching documents for relevant information..."
-    },
-    "answer_generation": {
-        "individual_answers": "Generating answers for each document..."
     },
     "document_preparation": {
         "format_raw": "Preparing documents for analysis..."
@@ -166,7 +104,6 @@ def get_progress_message(stage: str, node: str) -> str:
         "instantiate_retriever_node": "retriever",
         "generate_multi_queries_node": "multi_queries",
         "extract_documents_node": "extraction",
-        "generate_answers_node": "individual_answers",
         "format_raw_documents_for_synthesis_node": "format_raw",
         "combine_answers_node": "combine_answers"
     }

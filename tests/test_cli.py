@@ -1,5 +1,3 @@
-
-
 import os
 import tempfile
 import pytest
@@ -21,16 +19,13 @@ def patch_agent(monkeypatch):
             self,
             user_question,
             selected_files=None,
-            bypass_individual_gen=False,
             n_alternatives_override=None,
             k_per_query_override=None
         ):
             return {
                 "generation": f"echo: {user_question}",
-                "individual_answers": {},
                 "documents_by_file": {},
-                "raw_documents_for_synthesis": None,
-                "bypass_individual_generation": bypass_individual_gen
+                "raw_documents_for_synthesis": None
             }
 
     # Patch the KnowAIAgent class and clear any existing sessions
@@ -79,7 +74,6 @@ def test_ask_after_initialize(tmp_path):
     assert ask_resp.status_code == 200
     result = ask_resp.json()
     assert result["generation"] == "echo: Hello, world!"
-    assert result["bypass_individual_generation"] is False
 
 def test_ask_unknown_session():
     """
