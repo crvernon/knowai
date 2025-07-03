@@ -317,3 +317,42 @@ python scripts/test_no_chunks_feedback.py
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+#### Individual File Processing
+
+KnowAI supports two processing modes for handling multiple files:
+
+**Traditional Batch Processing (Default)**
+- All documents from all files are combined and processed together
+- Faster processing, good for related content across files
+
+**Individual File Processing**
+- Each file is processed separately by the LLM (in parallel, max 10 concurrent), then responses are consolidated
+- Ensures each file gets equal attention, better for distinct topics
+- Significantly faster than sequential processing for multiple files
+- Concurrency limit prevents overwhelming the LLM service
+
+```python
+# Enable individual file processing
+agent = KnowAIAgent(
+    vectorstore_path=VSTORE_PATH,
+    process_files_individually=True  # Enable individual processing
+)
+
+# Or enable per-request
+response = await agent.process_turn(
+    user_question="What are the main strategies?",
+    selected_files=["file1.pdf", "file2.pdf"],
+    process_files_individually=True  # Override for this request
+)
+```
+
+**When to Use Individual File Processing:**
+- Files contain distinct topics that should be analyzed separately
+- You want to ensure each file gets equal attention from the LLM
+- You want to see how each file contributes to the final answer
+- Dealing with large files that might benefit from focused analysis
+
+For more details, see [Individual File Processing Documentation](docs/INDIVIDUAL_FILE_PROCESSING.md).
+
+#### Token Counting Configuration

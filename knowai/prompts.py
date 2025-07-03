@@ -74,6 +74,35 @@ PROGRESS_MESSAGES = {
     "synthesis": {
         "process_batches": "Processing documents in batches...",
         "combine_answers": "Synthesizing final response..."
+    },
+    "individual_processing": {
+        "process_individual_files": "Processing files asynchronously...",
+        "individual_processing_file_1_2": "Processing file 1 of 2...",
+        "individual_processing_file_2_2": "Processing file 2 of 2...",
+        "individual_processing_file_1_3": "Processing file 1 of 3...",
+        "individual_processing_file_2_3": "Processing file 2 of 3...",
+        "individual_processing_file_3_3": "Processing file 3 of 3..."
+    },
+    "routing_to_individual_processing": {
+        "routing": "Routing to individual file processing..."
+    },
+    "processing_in_batches": {
+        "processing": "Processing documents in batches..."
+    },
+    "processing_batch_1_2": {
+        "processing": "Processing batch 1 of 2..."
+    },
+    "processing_batch_2_2": {
+        "processing": "Processing batch 2 of 2..."
+    },
+    "consolidating_individual_responses": {
+        "consolidating": "Consolidating individual file responses..."
+    },
+    "combining_batch_results": {
+        "combining": "Combining batch results..."
+    },
+    "traditional_synthesis": {
+        "synthesizing": "Synthesizing final response..."
     }
 }
 
@@ -107,6 +136,7 @@ def get_progress_message(stage: str, node: str) -> str:
         "extract_documents_node": "extraction",
         "format_raw_documents_for_synthesis_node": "format_raw",
         "process_batches_node": "process_batches",
+        "process_individual_files_node": "process_individual_files",
         "combine_answers_node": "combine_answers"
     }
     

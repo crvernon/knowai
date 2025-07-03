@@ -48,6 +48,8 @@ SYSTEM_PROMPT_TOKENS = 2000  # Estimated tokens for system prompt
 CONVERSATION_HISTORY_BUFFER = 5000  # Buffer for conversation history
 USE_ACCURATE_TOKEN_COUNTING = True  # Default to using tiktoken when available
 MAX_COMPLETION_TOKENS = 32768  # Maximum tokens for completion
+MAX_CONCURRENT_LLM_CALLS = 10  # Limit concurrent LLM calls to 10
+
 
 def get_tokenizer():
     """
@@ -323,6 +325,10 @@ class GraphState(TypedDict):
         Results from processing multiple batches.
     use_accurate_token_counting : bool
         Whether to use tiktoken for accurate token counting (if available).
+    process_files_individually : bool
+        Whether to process each file individually and then consolidate responses.
+    individual_file_responses : Optional[Dict[str, str]]
+        Mapping of filenames to their individual LLM responses.
     """
     embeddings: Optional[LangchainEmbeddings]
     vectorstore_path: str
@@ -349,6 +355,8 @@ class GraphState(TypedDict):
     max_tokens_per_batch: int
     batch_results: Optional[List[str]]
     use_accurate_token_counting: bool
+    process_files_individually: bool
+    individual_file_responses: Optional[Dict[str, str]]
 
 
 def _is_content_policy_error(e: Exception) -> bool:
@@ -467,15 +475,39 @@ def instantiate_embeddings(state: GraphState) -> GraphState:
     if not state.get("embeddings"):
         logging.info("Instantiating embeddings model")
         try:
+            # Log configuration for debugging
+            deployment = os.getenv("AZURE_EMBEDDINGS_DEPLOYMENT")
+            endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+            api_key = os.getenv("AZURE_OPENAI_API_KEY")
+            api_version = os.getenv("AZURE_OPENAI_API_4p1_VERSION")
+            
+            logging.info(f"[instantiate_embeddings_node] Configuration - Deployment: {deployment}, API Version: {api_version}")
+            logging.info(f"[instantiate_embeddings_node] Configuration - Endpoint: {endpoint}")
+            logging.info(f"[instantiate_embeddings_node] Configuration - API Key: {'***' if api_key else 'NOT SET'}")
+            
             new_embeddings = AzureOpenAIEmbeddings(
-                azure_deployment=os.getenv("AZURE_EMBEDDINGS_DEPLOYMENT"),
-                azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
-                api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-                openai_api_version=os.getenv("AZURE_OPENAI_API_4p1_VERSION")
+                azure_deployment=deployment,
+                azure_endpoint=endpoint,
+                api_key=api_key,
+                openai_api_version=api_version
             )
+            
+            logging.info("[instantiate_embeddings_node] Embeddings model created successfully")
             state = {**state, "embeddings": new_embeddings}
+            
         except Exception as e:
-            logging.error(f"Failed to instantiate embeddings model: {e}")
+            logging.error(f"[instantiate_embeddings_node] Failed to instantiate embeddings model: {e}")
+            logging.error(f"[instantiate_embeddings_node] Error type: {type(e).__name__}")
+            logging.error(f"[instantiate_embeddings_node] Error details: {e}")
+            
+            # Log additional context for debugging
+            if hasattr(e, 'response'):
+                logging.error(f"[instantiate_embeddings_node] API Response: {e.response}")
+            if hasattr(e, 'status_code'):
+                logging.error(f"[instantiate_embeddings_node] Status Code: {e.status_code}")
+            if hasattr(e, 'body'):
+                logging.error(f"[instantiate_embeddings_node] Response Body: {e.body}")
+            
             state = {**state, "embeddings": None}
     else:
         logging.info("Using pre-instantiated embeddings model")
@@ -512,15 +544,41 @@ def instantiate_llm_large(state: GraphState) -> GraphState:
 
     if not state.get("llm_large"):
         try:
+            logging.info("[instantiate_llm_large_node] Creating large LLM instance")
+            
+            # Log configuration for debugging
+            deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
+            api_version = os.getenv("AZURE_OPENAI_API_4p1_VERSION")
+            endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+            api_key = os.getenv("AZURE_OPENAI_API_KEY")
+            
+            logging.info(f"[instantiate_llm_large_node] Configuration - Deployment: {deployment}, API Version: {api_version}")
+            logging.info(f"[instantiate_llm_large_node] Configuration - Endpoint: {endpoint}")
+            logging.info(f"[instantiate_llm_large_node] Configuration - API Key: {'***' if api_key else 'NOT SET'}")
+            
             new_llm = AzureChatOpenAI(
                 temperature=0.2,
-                api_version=os.getenv("AZURE_OPENAI_API_4p1_VERSION"),
-                azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+                api_version=api_version,
+                azure_deployment=deployment,
                 max_tokens=MAX_COMPLETION_TOKENS,
             )
+            
+            logging.info("[instantiate_llm_large_node] Large LLM instance created successfully")
             state = {**state, "llm_large": new_llm}
+            
         except Exception as e:
-            logging.error(f"Failed to instantiate large LLM model: {e}")
+            logging.error(f"[instantiate_llm_large_node] Failed to instantiate large LLM model: {e}")
+            logging.error(f"[instantiate_llm_large_node] Error type: {type(e).__name__}")
+            logging.error(f"[instantiate_llm_large_node] Error details: {e}")
+            
+            # Log additional context for debugging
+            if hasattr(e, 'response'):
+                logging.error(f"[instantiate_llm_large_node] API Response: {e.response}")
+            if hasattr(e, 'status_code'):
+                logging.error(f"[instantiate_llm_large_node] Status Code: {e.status_code}")
+            if hasattr(e, 'body'):
+                logging.error(f"[instantiate_llm_large_node] Response Body: {e.body}")
+            
             state = {**state, "llm_large": None}
     else:
         logging.info("Using pre-instantiated large LLM model (for query generation)")
@@ -557,15 +615,41 @@ def instantiate_llm_small(state: GraphState) -> GraphState:
 
     if not state.get("llm_small"):
         try:
+            logging.info("[instantiate_llm_small_node] Creating small LLM instance")
+            
+            # Log configuration for debugging
+            deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NANO")
+            api_version = os.getenv("AZURE_OPENAI_API_4p1_VERSION")
+            endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+            api_key = os.getenv("AZURE_OPENAI_API_KEY")
+            
+            logging.info(f"[instantiate_llm_small_node] Configuration - Deployment: {deployment}, API Version: {api_version}")
+            logging.info(f"[instantiate_llm_small_node] Configuration - Endpoint: {endpoint}")
+            logging.info(f"[instantiate_llm_small_node] Configuration - API Key: {'***' if api_key else 'NOT SET'}")
+            
             new_llm = AzureChatOpenAI(
                 temperature=0.2,
-                api_version=os.getenv("AZURE_OPENAI_API_4p1_VERSION"),
-                azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NANO"),
+                api_version=api_version,
+                azure_deployment=deployment,
                 max_tokens=MAX_COMPLETION_TOKENS,
             )
+            
+            logging.info("[instantiate_llm_small_node] Small LLM instance created successfully")
             state = {**state, "llm_small": new_llm}
+            
         except Exception as e:
-            logging.error(f"Failed to instantiate small LLM model: {e}")
+            logging.error(f"[instantiate_llm_small_node] Failed to instantiate small LLM model: {e}")
+            logging.error(f"[instantiate_llm_small_node] Error type: {type(e).__name__}")
+            logging.error(f"[instantiate_llm_small_node] Error details: {e}")
+            
+            # Log additional context for debugging
+            if hasattr(e, 'response'):
+                logging.error(f"[instantiate_llm_small_node] API Response: {e.response}")
+            if hasattr(e, 'status_code'):
+                logging.error(f"[instantiate_llm_small_node] Status Code: {e.status_code}")
+            if hasattr(e, 'body'):
+                logging.error(f"[instantiate_llm_small_node] Response Body: {e.body}")
+            
             state = {**state, "llm_small": None}
     else:
         logging.info("Using pre-instantiated small LLM model (for query generation)")
@@ -1051,11 +1135,11 @@ def format_raw_documents_for_synthesis_node(state: GraphState) -> GraphState:
 
 async def process_batches_node(state: GraphState) -> GraphState:
     """
-    Process documents in batches to avoid exceeding token limits.
+    Process documents in batches to avoid exceeding token limits or route to individual file processing.
     
-    This node checks if the estimated tokens for all documents would exceed
-    the model's context window (with safety margin). If so, it processes
-    documents in smaller batches and combines the results.
+    This node checks the `process_files_individually` flag to determine the processing approach:
+    1. If `process_files_individually` is True: Skip batch processing and route to individual file processing
+    2. If `process_files_individually` is False: Check if estimated tokens exceed limits and process in batches if needed
     
     Parameters
     ----------
@@ -1065,7 +1149,7 @@ async def process_batches_node(state: GraphState) -> GraphState:
     Returns
     -------
     GraphState
-        Updated state with batch results or single generation.
+        Updated state with batch results or routing to individual processing.
     """
     start_time = _log_node_start("process_batches_node")
     _update_progress_callback(state, "process_batches_node", "synthesis")
@@ -1074,12 +1158,20 @@ async def process_batches_node(state: GraphState) -> GraphState:
     allowed_files = state.get("allowed_files")
     conversation_history = state.get("conversation_history")
     combined_docs_list = state.get("combined_documents", [])
+    process_files_individually = state.get("process_files_individually", False)
     max_tokens_per_batch = state.get("max_tokens_per_batch", int(GPT4_1_CONTEXT_WINDOW * (1 - TOKEN_SAFETY_MARGIN)))
     
     if not question or not combined_docs_list:
         # No processing needed
         return state
     
+    if process_files_individually:
+        # Route to individual file processing - skip batch processing
+        logging.info("[process_batches_node] Individual file processing mode - skipping batch processing")
+        _update_progress_callback(state, "process_batches_node", "routing_to_individual_processing")
+        return state
+    
+    # Traditional batch processing logic
     conversation_history_str = _format_conversation_history(conversation_history)
     
     # Track files with no docs
@@ -1117,6 +1209,7 @@ async def process_batches_node(state: GraphState) -> GraphState:
     else:
         # Need to process in batches
         logging.info(f"[process_batches_node] Processing {len(combined_docs_list)} documents in batches")
+        _update_progress_callback(state, "process_batches_node", "processing_in_batches")
         
         # Create batches
         batches = create_content_batches(
@@ -1141,6 +1234,11 @@ async def process_batches_node(state: GraphState) -> GraphState:
         
         for i, (batch_docs, batch_tokens) in enumerate(batches):
             logging.info(f"[process_batches_node] Processing batch {i+1}/{len(batches)} ({batch_tokens:,} tokens)")
+            _update_progress_callback(
+                state, 
+                "process_batches_node", 
+                f"processing_batch_{i+1}_{len(batches)}"
+            )
             
             # Format batch content
             batch_content = "\n\n".join([
@@ -1248,6 +1346,8 @@ async def _stream_final_generation(
         The complete generated response.
     """
     try:
+        logging.info("[_stream_final_generation] Creating streaming chain")
+        
         # Create the streaming chain
         chain = combo_prompt | llm_instance | StrOutputParser()
 
@@ -1259,34 +1359,74 @@ async def _stream_final_generation(
             "files_errors": ", ".join(error_list) if error_list else "None",
             "conversation_history": conversation_history_str
         }
+        
+        logging.info(f"[_stream_final_generation] Input data prepared - question length: {len(question)}, content length: {len(content_llm)}")
 
         if streaming_callback:
             # Use streaming if callback is provided
+            logging.info("[_stream_final_generation] Using streaming mode")
             full_response = ""
-            async for chunk in chain.astream(input_data):
-                if chunk:
-                    full_response += chunk
-                    streaming_callback(chunk)
-            return full_response
+            try:
+                async for chunk in chain.astream(input_data):
+                    if chunk:
+                        full_response += chunk
+                        streaming_callback(chunk)
+                logging.info(f"[_stream_final_generation] Streaming completed - response length: {len(full_response)}")
+                return full_response
+            except Exception as stream_error:
+                logging.error(f"[_stream_final_generation] Streaming error: {stream_error}")
+                logging.error(f"[_stream_final_generation] Streaming error type: {type(stream_error).__name__}")
+                if hasattr(stream_error, 'response'):
+                    logging.error(f"[_stream_final_generation] API Response: {stream_error.response}")
+                if hasattr(stream_error, 'status_code'):
+                    logging.error(f"[_stream_final_generation] Status Code: {stream_error.status_code}")
+                raise
         else:
             # Use regular invocation if no streaming callback
-            return await chain.ainvoke(input_data)
+            logging.info("[_stream_final_generation] Using regular invocation mode")
+            try:
+                result = await chain.ainvoke(input_data)
+                logging.info(f"[_stream_final_generation] Regular invocation completed - response length: {len(result)}")
+                return result
+            except Exception as invoke_error:
+                logging.error(f"[_stream_final_generation] Invocation error: {invoke_error}")
+                logging.error(f"[_stream_final_generation] Invocation error type: {type(invoke_error).__name__}")
+                if hasattr(invoke_error, 'response'):
+                    logging.error(f"[_stream_final_generation] API Response: {invoke_error.response}")
+                if hasattr(invoke_error, 'status_code'):
+                    logging.error(f"[_stream_final_generation] Status Code: {invoke_error.status_code}")
+                raise
 
     except Exception as e:
+        logging.error(f"[_stream_final_generation] Critical error in generation: {e}")
+        logging.error(f"[_stream_final_generation] Error type: {type(e).__name__}")
+        logging.error(f"[_stream_final_generation] Error details: {e}")
+        
+        # Log additional context for debugging
+        if hasattr(e, 'response'):
+            logging.error(f"[_stream_final_generation] API Response: {e.response}")
+        if hasattr(e, 'status_code'):
+            logging.error(f"[_stream_final_generation] Status Code: {e.status_code}")
+        if hasattr(e, 'body'):
+            logging.error(f"[_stream_final_generation] Response Body: {e.body}")
+        
         if _is_content_policy_error(e):
-            logging.warning(f"Content policy violation during streaming generation: {e}")
+            logging.warning(f"[_stream_final_generation] Content policy violation during streaming generation: {e}")
             return CONTENT_POLICY_MESSAGE
         else:
-            logging.exception(f"Error during streaming generation: {e}")
+            logging.exception(f"[_stream_final_generation] Error during streaming generation: {e}")
             return f"Generation error: {e}. Content: {content_llm[:200]}..."
 
 
 async def combine_answers_node(state: GraphState) -> GraphState:
     """
-    Synthesize a final answer for the user by combining raw document text or batch results.
+    Synthesize a final answer for the user by combining raw document text, batch results, or individual file responses.
 
-    The function handles both single-batch processing (when documents fit within token limits)
-    and multi-batch processing (when documents exceed token limits and were processed in batches).
+    The function handles three processing modes:
+    1. Individual file processing: Combines responses from individual file processing
+    2. Multi-batch processing: Combines results from batch processing when documents exceed token limits
+    3. Single-batch processing: Traditional approach when documents fit within token limits
+    
     Content‑policy violations are propagated using the global :data:`CONTENT_POLICY_MESSAGE`.
 
     Error and "no‑info" conditions are tracked per file and injected back
@@ -1297,7 +1437,8 @@ async def combine_answers_node(state: GraphState) -> GraphState:
     state : GraphState
         Current mutable graph state containing (among others) the keys
         ``question``, ``allowed_files``, ``raw_documents_for_synthesis``,
-        ``batch_results``, ``combine_threshold``, and ``conversation_history``.
+        ``batch_results``, ``individual_file_responses``, ``process_files_individually``,
+        ``combine_threshold``, and ``conversation_history``.
 
     Returns
     -------
@@ -1312,6 +1453,8 @@ async def combine_answers_node(state: GraphState) -> GraphState:
     allowed_files = state.get("allowed_files")
     conversation_history = state.get("conversation_history")
     batch_results = state.get("batch_results")
+    individual_file_responses = state.get("individual_file_responses", {})
+    process_files_individually = state.get("process_files_individually", False)
     output_generation: Optional[str] = "Error during synthesis."
     state_to_return = {**state}
 
@@ -1325,9 +1468,61 @@ async def combine_answers_node(state: GraphState) -> GraphState:
     else:
         conversation_history_str = _format_conversation_history(conversation_history)
 
-        if batch_results and len(batch_results) > 1:
+        if process_files_individually and individual_file_responses:
+            # Individual file processing mode - consolidate individual responses
+            logging.info(f"[combine_answers_node] Consolidating {len(individual_file_responses)} individual file responses")
+            _update_progress_callback(state, "combine_answers_node", "consolidating_individual_responses")
+            
+            detailed_flag = state.get("detailed_response_desired", True)
+            llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
+            streaming_callback = state.get("streaming_callback")
+            
+            # Create a consolidation prompt for individual file responses
+            consolidation_prompt = PromptTemplate(
+                template=(
+                    "You are an expert AI assistant. Consolidate the following individual file responses "
+                    "into a single comprehensive answer.\n\n"
+                    "User's Question: {question}\n\n"
+                    "Individual File Responses:\n{formatted_answers_or_raw_docs}\n\n"
+                    "Conversation History: {conversation_history}\n\n"
+                    "Instructions: Synthesize the individual file responses into a coherent, "
+                    "comprehensive answer that addresses the user's question. "
+                    "Maintain all relevant information from each file response. "
+                    "Structure the response logically and avoid repetition. "
+                    "When referencing information, cite the specific file it came from. "
+                    "If some files had no relevant information, acknowledge this clearly.\n\n"
+                    "Consolidated Answer:"
+                ),
+                input_variables=["question", "formatted_answers_or_raw_docs", "conversation_history"]
+            )
+            
+            # Format individual file responses
+            formatted_responses = []
+            for filename in allowed_files:
+                if filename in individual_file_responses:
+                    response = individual_file_responses[filename]
+                    formatted_responses.append(f"--- File: {filename} ---\n{response}")
+                else:
+                    formatted_responses.append(f"--- File: {filename} ---\nNo response generated for this file.")
+            
+            combined_content = "\n\n".join(formatted_responses)
+            
+            # Generate final consolidated response
+            output_generation = await _stream_final_generation(
+                question=question,
+                content_llm=combined_content,
+                llm_instance=llm_instance,
+                combo_prompt=consolidation_prompt,
+                conversation_history_str=conversation_history_str,
+                no_info_list=[],  # Already handled in individual processing
+                error_list=[],    # Already handled in individual processing
+                streaming_callback=streaming_callback
+            )
+            
+        elif batch_results and len(batch_results) > 1:
             # Multiple batches were processed, combine the results
             logging.info(f"[combine_answers_node] Combining {len(batch_results)} batch results")
+            _update_progress_callback(state, "combine_answers_node", "combining_batch_results")
             
             detailed_flag = state.get("detailed_response_desired", True)
             llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
@@ -1376,6 +1571,7 @@ async def combine_answers_node(state: GraphState) -> GraphState:
         else:
             # No batch processing occurred, use traditional single-batch approach
             logging.info("[combine_answers_node] Using traditional single-batch processing")
+            _update_progress_callback(state, "combine_answers_node", "traditional_synthesis")
             
             detailed_flag = state.get("detailed_response_desired", True)
             llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
@@ -1425,6 +1621,177 @@ async def combine_answers_node(state: GraphState) -> GraphState:
     return state_to_return
 
 
+async def process_individual_files_node(state: GraphState) -> GraphState:
+    """
+    Process each file individually to generate separate responses for each file.
+    
+    This node takes the documents retrieved for each file and generates an
+    individual LLM response for each file asynchronously in parallel, with
+    a maximum of 10 concurrent LLM calls to prevent overwhelming the service.
+    The responses are stored in `individual_file_responses` for later consolidation.
+    
+    Parameters
+    ----------
+    state : GraphState
+        Current mutable graph state containing documents and processing parameters.
+        
+    Returns
+    -------
+    GraphState
+        Updated state with individual file responses.
+    """
+    start_time = _log_node_start("process_individual_files_node")
+    _update_progress_callback(state, "process_individual_files_node", "individual_processing")
+    
+    question = state.get("question")
+    allowed_files = state.get("allowed_files")
+    documents_by_file = state.get("documents_by_file", {})
+    conversation_history = state.get("conversation_history")
+    detailed_flag = state.get("detailed_response_desired", True)
+    llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
+    
+    if not question or not allowed_files or not documents_by_file:
+        logging.info("[process_individual_files_node] Missing required data. Skipping individual processing.")
+        return {**state, "individual_file_responses": {}}
+    
+    if not llm_instance:
+        logging.error("[process_individual_files_node] LLM instance not available. Cannot process files.")
+        return {**state, "individual_file_responses": {}}
+    
+    conversation_history_str = _format_conversation_history(conversation_history)
+    combo_prompt = get_synthesis_prompt_template()
+    
+    # Limit concurrent LLM calls to 10
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_LLM_CALLS)
+    
+    logging.info(f"[process_individual_files_node] Processing {len(allowed_files)} files asynchronously (max {MAX_CONCURRENT_LLM_CALLS} concurrent)")
+    
+    async def process_single_file(filename: str) -> tuple[str, str]:
+        """
+        Process a single file asynchronously with concurrency control.
+        
+        Parameters
+        ----------
+        filename : str
+            Name of the file to process.
+            
+        Returns
+        -------
+        tuple[str, str]
+            Tuple of (filename, response).
+        """
+        try:
+            async with semaphore:  # Limit concurrent access
+                logging.info(f"[process_individual_files_node] Starting async processing for {filename}")
+                
+                docs_list = documents_by_file.get(filename, [])
+                
+                if not docs_list:
+                    logging.info(f"[process_individual_files_node] No documents found for {filename}")
+                    return filename, f"No relevant information found in {filename}."
+                
+                # Format documents for this file
+                file_content_lines = []
+                for doc in docs_list:
+                    page = doc.metadata.get('page', 'N/A')
+                    file_content_lines.append(f"Page {page}:\n{doc.page_content}")
+                
+                file_content = "\n\n---\n\n".join(file_content_lines)
+                
+                # Track files with no info and errors (empty for individual processing)
+                no_info_list = []
+                error_list = []
+                
+                try:
+                    logging.info(f"[process_individual_files_node] Making LLM call for {filename}")
+                    
+                    # Generate response for this individual file
+                    file_response = await _stream_final_generation(
+                        question=question,
+                        content_llm=file_content,
+                        llm_instance=llm_instance,
+                        combo_prompt=combo_prompt,
+                        conversation_history_str=conversation_history_str,
+                        no_info_list=no_info_list,
+                        error_list=error_list,
+                        streaming_callback=None  # Don't stream individual file responses
+                    )
+                    
+                    logging.info(f"[process_individual_files_node] Completed async processing for {filename} ({len(file_response)} chars)")
+                    return filename, file_response
+                    
+                except Exception as e:
+                    # Log detailed error information
+                    error_msg = f"Error processing {filename}: {str(e)}"
+                    logging.error(f"[process_individual_files_node] {error_msg}")
+                    logging.error(f"[process_individual_files_node] Error type: {type(e).__name__}")
+                    logging.error(f"[process_individual_files_node] Error details: {e}")
+                    
+                    # Log additional context for debugging
+                    if hasattr(e, 'response'):
+                        logging.error(f"[process_individual_files_node] API Response: {e.response}")
+                    if hasattr(e, 'status_code'):
+                        logging.error(f"[process_individual_files_node] Status Code: {e.status_code}")
+                    if hasattr(e, 'body'):
+                        logging.error(f"[process_individual_files_node] Response Body: {e.body}")
+                    
+                    return filename, error_msg
+                    
+        except Exception as outer_e:
+            # Catch any errors in the semaphore or outer processing
+            error_msg = f"Critical error processing {filename}: {str(outer_e)}"
+            logging.error(f"[process_individual_files_node] {error_msg}")
+            logging.error(f"[process_individual_files_node] Outer error type: {type(outer_e).__name__}")
+            logging.error(f"[process_individual_files_node] Outer error details: {outer_e}")
+            return filename, error_msg
+    
+    try:
+        # Process all files asynchronously with concurrency control
+        logging.info(f"[process_individual_files_node] Creating {len(allowed_files)} async tasks")
+        tasks = [process_single_file(filename) for filename in allowed_files]
+        
+        logging.info(f"[process_individual_files_node] Starting asyncio.gather with {len(tasks)} tasks")
+        
+        # Wait for all files to complete processing
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        logging.info(f"[process_individual_files_node] asyncio.gather completed with {len(results)} results")
+        
+    except Exception as gather_error:
+        logging.error(f"[process_individual_files_node] Error in asyncio.gather: {gather_error}")
+        logging.error(f"[process_individual_files_node] Gather error type: {type(gather_error).__name__}")
+        logging.error(f"[process_individual_files_node] Gather error details: {gather_error}")
+        
+        # Return empty results on critical error
+        results = []
+    
+    # Convert results to dictionary
+    individual_responses: Dict[str, str] = {}
+    successful_files = 0
+    failed_files = 0
+    
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            failed_files += 1
+            logging.error(f"[process_individual_files_node] Task {i} failed with exception: {result}")
+            logging.error(f"[process_individual_files_node] Task {i} exception type: {type(result).__name__}")
+            continue
+        
+        if isinstance(result, tuple) and len(result) == 2:
+            filename, response = result
+            individual_responses[filename] = response
+            successful_files += 1
+        else:
+            failed_files += 1
+            logging.error(f"[process_individual_files_node] Task {i} returned invalid result: {result}")
+    
+    logging.info(f"[process_individual_files_node] Processing summary: {successful_files} successful, {failed_files} failed")
+    logging.info(f"[process_individual_files_node] Completed async processing for {len(individual_responses)} files")
+    
+    _log_node_end("process_individual_files_node", start_time)
+    return {**state, "individual_file_responses": individual_responses}
+
+
 def create_graph_app() -> Graph:
     """
     Build and compile the LangGraph workflow for the KnowAI agent.
@@ -1436,7 +1803,8 @@ def create_graph_app() -> Graph:
     2. Generate multi-queries for the user's question.
     3. Extract document chunks relevant to the user's question.
     4. Format raw documents for synthesis.
-    5. Combine raw text into a final synthesized response.
+    5. Route to either batch processing or individual file processing based on configuration.
+    6. Combine raw text into a final synthesized response.
 
     Returns
     -------
@@ -1454,6 +1822,7 @@ def create_graph_app() -> Graph:
     workflow.add_node("extract_documents_node", extract_documents_parallel_node)
     workflow.add_node("format_raw_documents_node", format_raw_documents_for_synthesis_node)
     workflow.add_node("process_batches_node", process_batches_node)
+    workflow.add_node("process_individual_files_node", process_individual_files_node)
     workflow.add_node("combine_answers_node", combine_answers_node)
 
     workflow.set_entry_point("instantiate_embeddings_node")
@@ -1465,7 +1834,25 @@ def create_graph_app() -> Graph:
     workflow.add_edge("generate_multi_queries_node", "extract_documents_node")
     workflow.add_edge("extract_documents_node", "format_raw_documents_node")
     workflow.add_edge("format_raw_documents_node", "process_batches_node")
-    workflow.add_edge("process_batches_node", "combine_answers_node")
+    
+    # Conditional routing based on process_files_individually flag
+    def route_to_processing(state: GraphState) -> str:
+        """Route to individual file processing or combine answers based on configuration."""
+        if state.get("process_files_individually", False):
+            return "process_individual_files_node"
+        else:
+            return "combine_answers_node"
+    
+    workflow.add_conditional_edges(
+        "process_batches_node",
+        route_to_processing,
+        {
+            "process_individual_files_node": "process_individual_files_node",
+            "combine_answers_node": "combine_answers_node"
+        }
+    )
+    
+    workflow.add_edge("process_individual_files_node", "combine_answers_node")
     workflow.add_edge("combine_answers_node", END)
 
     return workflow.compile()

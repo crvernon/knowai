@@ -96,6 +96,11 @@ class KnowAIAgent:
     use_accurate_token_counting : bool, default ``True``
         Whether to use tiktoken for accurate token counting when available.
         Falls back to heuristic estimation if tiktoken is not available.
+    process_files_individually : bool, default ``False``
+        Whether to process each file individually and then consolidate responses.
+        When True, each file is processed separately by the LLM and then all
+        responses are combined into a final answer. When False, uses traditional
+        batch processing approach.
 
     Attributes
     ----------
@@ -116,7 +121,8 @@ class KnowAIAgent:
         env_file_path: Optional[str] = None,
         initial_state_overrides: Optional[Dict[str, Any]] = None,
         log_graph: bool = False,
-        use_accurate_token_counting: bool = True
+        use_accurate_token_counting: bool = True,
+        process_files_individually: bool = True
     ) -> None:
         if env_file_path and os.path.exists(env_file_path):
             load_dotenv(dotenv_path=env_file_path)
@@ -159,6 +165,8 @@ class KnowAIAgent:
             "max_tokens_per_batch": int(1_000_000 * 0.9),  # GPT-4.1 with 10% safety margin
             "batch_results": None,
             "use_accurate_token_counting": use_accurate_token_counting,
+            "process_files_individually": process_files_individually,
+            "individual_file_responses": None,
         }
 
         if initial_state_overrides:
@@ -223,7 +231,8 @@ class KnowAIAgent:
         k_per_query_override: Optional[int] = None,
         progress_cb: Optional[Callable[[str, str, Dict[str, Any]], None]] = None,
         detailed_response_desired: Optional[bool] = None,
-        streaming_callback: Optional[Callable[[str], None]] = None
+        streaming_callback: Optional[Callable[[str], None]] = None,
+        process_files_individually: Optional[bool] = None
     ) -> Dict[str, Any]:
         """
         Processes a single conversational turn.
@@ -245,6 +254,11 @@ class KnowAIAgent:
         streaming_callback : Optional[Callable[[str], None]]
             Callback function to stream tokens as they're generated.
             If provided, the final LLM response will be streamed in real-time.
+        process_files_individually : Optional[bool]
+            Whether to process files individually instead of as a batch.
+            When True, each file is processed separately by the LLM and then
+            all responses are combined into a final answer. When False, uses
+            traditional batch processing approach.
 
         Returns:
             A dictionary containing:
@@ -264,6 +278,9 @@ class KnowAIAgent:
             self.session_state["n_alternatives"] = n_alternatives_override
         if k_per_query_override is not None:
             self.session_state["k_per_query"] = k_per_query_override
+
+        if process_files_individually is not None:
+            self.session_state["process_files_individually"] = process_files_individually
 
         # Ensure all required GraphState keys are present
         for key in GraphState.__annotations__.keys():
