@@ -13,12 +13,48 @@ INDIVIDUAL_ANSWER_PROMPT = """You are an expert assistant. Answer the user's que
 Context from File '{filename}' (Chunks from Pages X, Y, Z...):
 {context}
 Question: {question}
-Detailed Answer (with citations like "quote..." ({filename}, Page X)):"""
+Detailed Answer (with citations like "quote..." ({filename}, Page X)):
+IMPORTANT: Always use the exact filename '{filename}' in citations, never use generic terms like "file.pdf"."""
 
 INDIVIDUAL_ANSWER_TEMPLATE = PromptTemplate(
     template=INDIVIDUAL_ANSWER_PROMPT,
     input_variables=["context", "question", "filename"]
 )
+
+
+def get_individual_answer_template_for_model(is_nano_model: bool = False) -> PromptTemplate:
+    """
+    Get the appropriate individual answer template based on the model type.
+    
+    Parameters
+    ----------
+    is_nano_model : bool
+        Whether the model is a nano/small model that needs more explicit instructions
+        
+    Returns
+    -------
+    PromptTemplate
+        The appropriate prompt template for individual answer generation
+    """
+    if is_nano_model:
+        # More explicit prompt for nano models
+        nano_prompt = """You are an expert assistant. Answer the user's question based ONLY on the provided context from a SINGLE FILE.
+Context from File '{filename}' (Chunks from Pages X, Y, Z...):
+{context}
+Question: {question}
+Detailed Answer (with citations like "quote..." ({filename}, Page X)):
+CRITICAL INSTRUCTIONS FOR NANO MODEL:
+1. ALWAYS use the exact filename '{filename}' in every citation
+2. NEVER use generic terms like "file.pdf", "document.pdf", or "the file"
+3. Format citations as: "quoted text..." ({filename}, Page X)
+4. The filename '{filename}' must appear exactly as shown in every citation"""
+        
+        return PromptTemplate(
+            template=nano_prompt,
+            input_variables=["context", "question", "filename"]
+        )
+    else:
+        return INDIVIDUAL_ANSWER_TEMPLATE
 
 
 # Synthesis Prompts
@@ -28,7 +64,7 @@ User's CURRENT Question: {question}
 Individual PRE-PROCESSED Answers: {formatted_answers_or_raw_docs}
 Files with No Relevant Info: {files_no_info}
 Files with Errors: {files_errors}
-Instructions: Synthesize, preserve details & citations (e.g., "quote..." (file.pdf, Page X)). Attribute. Structure. Handle contradictions. Acknowledge files with no info/errors.
+Instructions: Synthesize, preserve details & citations. IMPORTANT: Always use the exact filename from the source (e.g., "quote..." (actual_filename.pdf, Page X)), never use generic terms like "file.pdf". Attribute. Structure. Handle contradictions. Acknowledge files with no info/errors.
 Synthesized Answer:"""
 
 RAW_DOCUMENTS_SYNTHESIS_PROMPT = """You are an expert AI assistant. Answer CURRENT question based ONLY on RAW text chunks.
@@ -37,7 +73,7 @@ User's CURRENT Question: {question}
 RAW Text Chunks: {formatted_answers_or_raw_docs}
 Files with No Relevant Info (no chunks extracted): {files_no_info}
 Files with Errors (extraction errors): {files_errors}
-Instructions: Read raw text. Answer ONLY from raw text. Quote with citations (e.g., "quote..." (file.pdf, Page X)). If info not found, state it. Structure logically.
+Instructions: Read raw text. Answer ONLY from raw text. Quote with citations. IMPORTANT: Always use the exact filename from the source (e.g., "quote..." (actual_filename.pdf, Page X)), never use generic terms like "file.pdf". If info not found, state it. Structure logically.
 Synthesized Answer from RAW Docs:"""
 
 
