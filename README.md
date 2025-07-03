@@ -84,6 +84,61 @@ The returned dictionary contains:
 | `raw_documents_for_synthesis` | Raw text block used when bypassing individual generation.    |
 | `bypass_individual_generation`| Whether the bypass mode was used for this turn.              |
 
+#### Token Counting Configuration
+
+KnowAI supports two methods for token counting to manage context window limits:
+
+**Accurate Token Counting (Default)**
+- Uses `tiktoken` library for precise token estimation
+- More accurate batch sizing and context management
+- Automatically falls back to heuristic method if `tiktoken` unavailable
+
+```python
+# Default behavior (accurate token counting)
+agent = KnowAIAgent(vectorstore_path=VSTORE_PATH)
+
+# Explicit accurate token counting
+agent = KnowAIAgent(
+    vectorstore_path=VSTORE_PATH,
+    use_accurate_token_counting=True
+)
+```
+
+**Heuristic Token Counting**
+- Uses character-based estimation (4 characters ≈ 1 token)
+- Faster performance, suitable when approximate estimation is sufficient
+- Always available as fallback
+
+```python
+# Use heuristic token counting
+agent = KnowAIAgent(
+    vectorstore_path=VSTORE_PATH,
+    use_accurate_token_counting=False
+)
+```
+
+**CLI Configuration**
+```bash
+curl -X POST http://127.0.0.1:8000/initialize \
+  -H "Content-Type: application/json" \
+  -d '{
+    "vectorstore_s3_uri": "/path/to/vectorstore",
+    "use_accurate_token_counting": true
+  }'
+```
+
+**Benefits of Accurate Token Counting:**
+- More precise token limits and batch sizing
+- Reduced risk of context overflow
+- Better resource utilization
+- Improved reliability with large document sets
+
+**When to Use Heuristic Counting:**
+- `tiktoken` not available in environment
+- Performance is critical
+- Approximate estimation is sufficient
+- Debugging token counting issues
+
 #### Streamlit chat app
 
 If you prefer a ready‑made UI, launch the demo:
@@ -200,3 +255,65 @@ For more details on streaming functionality, see [docs/STREAMING.md](docs/STREAM
        "selected_files":[]
      }'
    ```
+
+## Enhanced User Feedback
+
+KnowAI provides comprehensive feedback when the search process doesn't find relevant information in your documents.
+
+### No-Chunks Feedback
+
+When no text chunks are extracted for a query in a file, KnowAI ensures users are clearly informed:
+
+- **Individual File Level**: Each file that has no matching content receives a specific message explaining that "The search did not retrieve any document chunks that match your query."
+- **Synthesis Level**: The final response clearly states which files had no relevant content, helping users understand the scope of the search results.
+- **Progress Tracking**: Files with no matching content are tracked separately from files with errors, providing clear distinction in the response.
+
+### Example Response
+
+When asking about "climate change impacts" across multiple reports:
+
+```
+I found information about climate change impacts in the following reports:
+
+From report1.pdf (Page 15):
+"Global temperatures have increased by 1.1°C since pre-industrial times..."
+
+From report2.pdf (Page 8):
+"Sea level rise is accelerating at a rate of 3.3mm per year..."
+
+No matching content found in: report3.pdf (no matching content).
+```
+
+This helps users understand:
+- Which files contained relevant information
+- Which files were searched but had no matching content
+- The specific nature of missing information
+
+### Error Handling
+
+KnowAI distinguishes between different types of issues:
+- **No matching content**: Files that were searched but had no relevant chunks
+- **Content policy violations**: Issues with AI provider content filters
+- **Processing errors**: Technical issues during document processing
+
+Each type is handled appropriately and communicated clearly to the user.
+
+## Testing
+
+Run the test suite to verify functionality:
+
+```bash
+# Run all tests
+python -m pytest
+
+# Test specific functionality
+python -m pytest tests/test_prompts.py -v
+python -m pytest tests/test_agent.py -v
+
+# Test no-chunks feedback improvements
+python scripts/test_no_chunks_feedback.py
+```
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.

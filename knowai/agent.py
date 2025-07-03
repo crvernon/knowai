@@ -7,7 +7,8 @@ import asyncio
 import logging
 import os
 import time
-from typing import List, TypedDict, Dict, Optional, Callable
+import re
+from typing import List, TypedDict, Dict, Optional, Callable, Tuple
 
 from langchain_community.vectorstores import FAISS
 from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
@@ -21,6 +22,14 @@ from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph as Graph
 
+# Try to import tiktoken for accurate token counting
+try:
+    import tiktoken
+    TIKTOKEN_AVAILABLE = True
+except ImportError:
+    TIKTOKEN_AVAILABLE = False
+    logging.warning("tiktoken not available. Using heuristic token estimation.")
+
 from .prompts import (
     get_synthesis_prompt_template,
     CONTENT_POLICY_MESSAGE,
@@ -29,6 +38,231 @@ from .prompts import (
 
 
 logger = logging.getLogger(__name__)
+
+
+# Token management constants
+GPT4_1_CONTEXT_WINDOW = 1_000_000  # GPT-4.1 context window
+TOKEN_SAFETY_MARGIN = 0.1  # 10% safety margin
+DEFAULT_TOKENS_PER_CHAR = 0.25  # Rough estimate: 4 chars per token
+SYSTEM_PROMPT_TOKENS = 2000  # Estimated tokens for system prompt
+CONVERSATION_HISTORY_BUFFER = 5000  # Buffer for conversation history
+USE_ACCURATE_TOKEN_COUNTING = True  # Default to using tiktoken when available
+MAX_COMPLETION_TOKENS = 32768  # Maximum tokens for completion
+
+def get_tokenizer():
+    """
+    Get the appropriate tokenizer based on availability and configuration.
+    
+    Returns
+    -------
+    Optional[tiktoken.Encoding]
+        tiktoken tokenizer if available and enabled, None otherwise.
+    """
+    if USE_ACCURATE_TOKEN_COUNTING and TIKTOKEN_AVAILABLE:
+        try:
+            # Use cl100k_base encoding which is used by GPT-4
+            return tiktoken.get_encoding("cl100k_base")
+        except Exception as e:
+            logging.warning(f"Failed to initialize tiktoken: {e}. Falling back to heuristic estimation.")
+            return None
+    return None
+
+
+def estimate_tokens(text: str, use_accurate: bool = USE_ACCURATE_TOKEN_COUNTING) -> int:
+    """
+    Estimate the number of tokens in a text string.
+    
+    Parameters
+    ----------
+    text : str
+        The text to estimate tokens for.
+    use_accurate : bool
+        Whether to use tiktoken for accurate counting (if available).
+        
+    Returns
+    -------
+    int
+        Estimated number of tokens.
+    """
+    if not text:
+        return 0
+    
+    if use_accurate and TIKTOKEN_AVAILABLE:
+        try:
+            tokenizer = get_tokenizer()
+            if tokenizer:
+                return len(tokenizer.encode(text))
+        except Exception as e:
+            logging.warning(f"tiktoken failed: {e}. Falling back to heuristic estimation.")
+    
+    # Fallback to heuristic estimation
+    cleaned_text = re.sub(r'\s+', ' ', text.strip())
+    return int(len(cleaned_text) * DEFAULT_TOKENS_PER_CHAR)
+
+
+def estimate_synthesis_tokens(
+    question: str,
+    content: str,
+    conversation_history: str,
+    files_no_info: str,
+    files_errors: str,
+    use_accurate: bool = USE_ACCURATE_TOKEN_COUNTING
+) -> int:
+    """
+    Estimate total tokens for a synthesis operation.
+    
+    Parameters
+    ----------
+    question : str
+        The user's question.
+    content : str
+        The document content to synthesize.
+    conversation_history : str
+        Formatted conversation history.
+    files_no_info : str
+        List of files with no information.
+    files_errors : str
+        List of files with errors.
+    use_accurate : bool
+        Whether to use tiktoken for accurate counting (if available).
+        
+    Returns
+    -------
+    int
+        Estimated total tokens for the synthesis operation.
+    """
+    # Estimate tokens for each component
+    question_tokens = estimate_tokens(question, use_accurate)
+    content_tokens = estimate_tokens(content, use_accurate)
+    history_tokens = estimate_tokens(conversation_history, use_accurate)
+    no_info_tokens = estimate_tokens(files_no_info, use_accurate)
+    errors_tokens = estimate_tokens(files_errors, use_accurate)
+    
+    # Add system prompt and response buffer
+    total_tokens = (
+        SYSTEM_PROMPT_TOKENS +
+        question_tokens +
+        content_tokens +
+        history_tokens +
+        no_info_tokens +
+        errors_tokens +
+        CONVERSATION_HISTORY_BUFFER  # Buffer for response
+    )
+    
+    return total_tokens
+
+
+def create_content_batches(
+    documents: List[Document],
+    max_tokens_per_batch: int,
+    question: str,
+    conversation_history: str,
+    files_no_info: str,
+    files_errors: str,
+    use_accurate: bool = USE_ACCURATE_TOKEN_COUNTING
+) -> List[Tuple[List[Document], int]]:
+    """
+    Create batches of documents that fit within token limits.
+    
+    Parameters
+    ----------
+    documents : List[Document]
+        List of documents to batch.
+    max_tokens_per_batch : int
+        Maximum tokens allowed per batch.
+    question : str
+        The user's question.
+    conversation_history : str
+        Formatted conversation history.
+    files_no_info : str
+        List of files with no information.
+    files_errors : str
+        List of files with errors.
+    use_accurate : bool
+        Whether to use tiktoken for accurate counting (if available).
+        
+    Returns
+    -------
+    List[Tuple[List[Document], int]]
+        List of (documents, estimated_tokens) tuples for each batch.
+    """
+    batches = []
+    current_batch = []
+    current_tokens = 0
+    
+    # Calculate overhead tokens (question, history, etc.)
+    overhead_tokens = estimate_synthesis_tokens(
+        question=question,
+        content="",  # Empty content to get just overhead
+        conversation_history=conversation_history,
+        files_no_info=files_no_info,
+        files_errors=files_errors,
+        use_accurate=use_accurate
+    )
+    
+    # Ensure overhead doesn't exceed the batch limit
+    if overhead_tokens >= max_tokens_per_batch:
+        logging.warning(
+            f"Overhead tokens ({overhead_tokens:,}) exceed batch limit ({max_tokens_per_batch:,}). "
+            f"Using minimum batch size."
+        )
+        available_tokens = 1000  # Minimum available tokens
+    else:
+        available_tokens = max_tokens_per_batch - overhead_tokens
+    
+    for doc in documents:
+        # Format document content
+        fname = doc.metadata.get("file_name", "unknown")
+        page = doc.metadata.get("page", "N/A")
+        formatted_content = f"--- File: {fname} | Page: {page} ---\n{doc.page_content}"
+        
+        # Estimate tokens for this document
+        doc_tokens = estimate_tokens(formatted_content, use_accurate)
+        
+        # Check if this single document exceeds the available tokens
+        if doc_tokens > available_tokens:
+            logging.warning(
+                f"Document {fname} exceeds token limit ({doc_tokens:,} > {available_tokens:,}). "
+                f"Truncating content."
+            )
+            
+            # Truncate the document content to fit within limits
+            # Estimate how many characters we can keep
+            max_chars = int(available_tokens / DEFAULT_TOKENS_PER_CHAR)
+            truncated_content = doc.page_content[:max_chars] + "\n\n[Content truncated due to token limits]"
+            
+            # Create a new document with truncated content
+            truncated_doc = Document(
+                page_content=truncated_content,
+                metadata=doc.metadata
+            )
+            
+            # If we have a current batch, save it and start fresh
+            if current_batch:
+                batches.append((current_batch, current_tokens + overhead_tokens))
+                current_batch = []
+                current_tokens = 0
+            
+            # Add the truncated document as its own batch
+            truncated_formatted = f"--- File: {fname} | Page: {page} ---\n{truncated_content}"
+            truncated_tokens = estimate_tokens(truncated_formatted, use_accurate)
+            batches.append(([truncated_doc], truncated_tokens + overhead_tokens))
+            
+        elif current_tokens + doc_tokens > available_tokens and current_batch:
+            # Save current batch and start a new one
+            batches.append((current_batch, current_tokens + overhead_tokens))
+            current_batch = [doc]
+            current_tokens = doc_tokens
+        else:
+            # Add to current batch
+            current_batch.append(doc)
+            current_tokens += doc_tokens
+    
+    # Add the last batch if it has content
+    if current_batch:
+        batches.append((current_batch, current_tokens + overhead_tokens))
+    
+    return batches
 
 
 class GraphState(TypedDict):
@@ -66,19 +300,29 @@ class GraphState(TypedDict):
         List of previous conversation turns.
     raw_documents_for_synthesis : Optional[str]
         Raw document text formatted for the synthesizer.
+    combined_documents : Optional[List[Document]]
+        Combined list of all retrieved documents.
+    detailed_response_desired : Optional[bool]
+        Whether to use detailed (large) or simple (small) LLM.
     k_chunks_retriever : int
         Total chunks to retrieve for the base retriever.
+    k_chunks_retriever_all_docs : int
+        Total documents to fetch internally for filtering.
     combine_threshold : int
         Maximum number of individual answers that may be combined in a
         single batch before hierarchical combining is used.
-    detailed_response_desired : Optional[bool]
-        Whether to use detailed (large) or simple (small) LLM.
     generated_queries : Optional[List[str]]
         List of generated alternative queries.
     query_embeddings : Optional[List[List[float]]]
         Embeddings for generated queries.
     streaming_callback : Optional[Callable[[str], None]]
         Callback function for streaming tokens.
+    max_tokens_per_batch : int
+        Maximum tokens allowed per synthesis batch.
+    batch_results : Optional[List[str]]
+        Results from processing multiple batches.
+    use_accurate_token_counting : bool
+        Whether to use tiktoken for accurate token counting (if available).
     """
     embeddings: Optional[LangchainEmbeddings]
     vectorstore_path: str
@@ -102,6 +346,9 @@ class GraphState(TypedDict):
     generated_queries: Optional[List[str]]
     query_embeddings: Optional[List[List[float]]]
     streaming_callback: Optional[Callable[[str], None]]
+    max_tokens_per_batch: int
+    batch_results: Optional[List[str]]
+    use_accurate_token_counting: bool
 
 
 def _is_content_policy_error(e: Exception) -> bool:
@@ -266,9 +513,10 @@ def instantiate_llm_large(state: GraphState) -> GraphState:
     if not state.get("llm_large"):
         try:
             new_llm = AzureChatOpenAI(
-                temperature=0.1,
+                temperature=0.2,
                 api_version=os.getenv("AZURE_OPENAI_API_4p1_VERSION"),
                 azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+                max_tokens=MAX_COMPLETION_TOKENS,
             )
             state = {**state, "llm_large": new_llm}
         except Exception as e:
@@ -310,9 +558,10 @@ def instantiate_llm_small(state: GraphState) -> GraphState:
     if not state.get("llm_small"):
         try:
             new_llm = AzureChatOpenAI(
-                temperature=0.1,
+                temperature=0.2,
                 api_version=os.getenv("AZURE_OPENAI_API_4p1_VERSION"),
                 azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT_NANO"),
+                max_tokens=MAX_COMPLETION_TOKENS,
             )
             state = {**state, "llm_small": new_llm}
         except Exception as e:
@@ -800,6 +1049,130 @@ def format_raw_documents_for_synthesis_node(state: GraphState) -> GraphState:
     return {**state, "raw_documents_for_synthesis": formatted_raw_docs.strip()}
 
 
+async def process_batches_node(state: GraphState) -> GraphState:
+    """
+    Process documents in batches to avoid exceeding token limits.
+    
+    This node checks if the estimated tokens for all documents would exceed
+    the model's context window (with safety margin). If so, it processes
+    documents in smaller batches and combines the results.
+    
+    Parameters
+    ----------
+    state : GraphState
+        Current mutable graph state containing documents and token limits.
+        
+    Returns
+    -------
+    GraphState
+        Updated state with batch results or single generation.
+    """
+    start_time = _log_node_start("process_batches_node")
+    _update_progress_callback(state, "process_batches_node", "synthesis")
+    
+    question = state.get("question")
+    allowed_files = state.get("allowed_files")
+    conversation_history = state.get("conversation_history")
+    combined_docs_list = state.get("combined_documents", [])
+    max_tokens_per_batch = state.get("max_tokens_per_batch", int(GPT4_1_CONTEXT_WINDOW * (1 - TOKEN_SAFETY_MARGIN)))
+    
+    if not question or not combined_docs_list:
+        # No processing needed
+        return state
+    
+    conversation_history_str = _format_conversation_history(conversation_history)
+    
+    # Track files with no docs
+    docs_by_file = state.get("documents_by_file", {})
+    no_info_list = []
+    if allowed_files:
+        for af in allowed_files:
+            if not docs_by_file.get(af):
+                no_info_list.append(f"`{af}` (no chunks extracted)")
+    error_list = ["Error tracking for raw path not detailed here."]
+    
+    # Estimate total tokens for all documents
+    all_content = "\n\n".join([
+        f"--- File: {doc.metadata.get('file_name', 'unknown')} | Page: {doc.metadata.get('page', 'N/A')} ---\n{doc.page_content}"
+        for doc in combined_docs_list
+    ])
+    
+    total_estimated_tokens = estimate_synthesis_tokens(
+        question=question,
+        content=all_content,
+        conversation_history=conversation_history_str,
+        files_no_info=", ".join(no_info_list) if no_info_list else "None",
+        files_errors=", ".join(error_list) if error_list else "None",
+        use_accurate=state.get("use_accurate_token_counting", USE_ACCURATE_TOKEN_COUNTING)
+    )
+    
+    logging.info(f"[process_batches_node] Total estimated tokens: {total_estimated_tokens:,}")
+    logging.info(f"[process_batches_node] Max tokens per batch: {max_tokens_per_batch:,}")
+    logging.info(f"[process_batches_node] Using {'accurate' if state.get('use_accurate_token_counting', USE_ACCURATE_TOKEN_COUNTING) and TIKTOKEN_AVAILABLE else 'heuristic'} token counting")
+    
+    if total_estimated_tokens <= max_tokens_per_batch:
+        # Can process all documents in one batch
+        logging.info("[process_batches_node] Processing all documents in single batch")
+        return state
+    else:
+        # Need to process in batches
+        logging.info(f"[process_batches_node] Processing {len(combined_docs_list)} documents in batches")
+        
+        # Create batches
+        batches = create_content_batches(
+            documents=combined_docs_list,
+            max_tokens_per_batch=max_tokens_per_batch,
+            question=question,
+            conversation_history=conversation_history_str,
+            files_no_info=", ".join(no_info_list) if no_info_list else "None",
+            files_errors=", ".join(error_list) if error_list else "None",
+            use_accurate=state.get("use_accurate_token_counting", USE_ACCURATE_TOKEN_COUNTING)
+        )
+        
+        logging.info(f"[process_batches_node] Created {len(batches)} batches")
+        
+        # Process each batch
+        detailed_flag = state.get("detailed_response_desired", True)
+        llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
+        combo_prompt = get_synthesis_prompt_template()
+        streaming_callback = state.get("streaming_callback")
+        
+        batch_results = []
+        
+        for i, (batch_docs, batch_tokens) in enumerate(batches):
+            logging.info(f"[process_batches_node] Processing batch {i+1}/{len(batches)} ({batch_tokens:,} tokens)")
+            
+            # Format batch content
+            batch_content = "\n\n".join([
+                f"--- File: {doc.metadata.get('file_name', 'unknown')} | Page: {doc.metadata.get('page', 'N/A')} ---\n{doc.page_content}"
+                for doc in batch_docs
+            ])
+            
+            # Process batch
+            batch_result = await _stream_final_generation(
+                question=question,
+                content_llm=batch_content,
+                llm_instance=llm_instance,
+                combo_prompt=combo_prompt,
+                conversation_history_str=conversation_history_str,
+                no_info_list=no_info_list,
+                error_list=error_list,
+                streaming_callback=streaming_callback
+            )
+            
+            batch_results.append(batch_result)
+            
+            # Add batch separator for streaming
+            if streaming_callback and i < len(batches) - 1:
+                streaming_callback("\n\n--- Processing next batch ---\n\n")
+        
+        # Store batch results for final combination
+        state = {**state, "batch_results": batch_results}
+        
+        _log_node_end("process_batches_node", start_time)
+        return state
+
+
 def _format_conversation_history(
     history: Optional[List[Dict[str, str]]]
 ) -> str:
@@ -910,13 +1283,11 @@ async def _stream_final_generation(
 
 async def combine_answers_node(state: GraphState) -> GraphState:
     """
-    Synthesize a final answer for the user by combining raw document text.
+    Synthesize a final answer for the user by combining raw document text or batch results.
 
-    The function performs hierarchical combination when the number of
-    documents exceeds ``state['combine_threshold']`` by chunking the inputs
-    and calling synthesis asynchronously, followed by a final synthesis step.
-    Content‑policy violations are propagated using the global
-    :data:`CONTENT_POLICY_MESSAGE`.
+    The function handles both single-batch processing (when documents fit within token limits)
+    and multi-batch processing (when documents exceed token limits and were processed in batches).
+    Content‑policy violations are propagated using the global :data:`CONTENT_POLICY_MESSAGE`.
 
     Error and "no‑info" conditions are tracked per file and injected back
     into the final prompt so that the LLM can acknowledge gaps or issues.
@@ -926,7 +1297,7 @@ async def combine_answers_node(state: GraphState) -> GraphState:
     state : GraphState
         Current mutable graph state containing (among others) the keys
         ``question``, ``allowed_files``, ``raw_documents_for_synthesis``,
-        ``combine_threshold``, and ``conversation_history``.
+        ``batch_results``, ``combine_threshold``, and ``conversation_history``.
 
     Returns
     -------
@@ -940,7 +1311,7 @@ async def combine_answers_node(state: GraphState) -> GraphState:
     question = state.get("question")
     allowed_files = state.get("allowed_files")
     conversation_history = state.get("conversation_history")
-    raw_docs_for_synthesis = state.get("raw_documents_for_synthesis")
+    batch_results = state.get("batch_results")
     output_generation: Optional[str] = "Error during synthesis."
     state_to_return = {**state}
 
@@ -954,54 +1325,100 @@ async def combine_answers_node(state: GraphState) -> GraphState:
     else:
         conversation_history_str = _format_conversation_history(conversation_history)
 
-        detailed_flag = state.get("detailed_response_desired", True)
-        llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
-
-        # Use centralized prompt template for raw documents
-        combo_prompt = get_synthesis_prompt_template()
-
-        no_info_list: List[str] = []
-        error_list: List[str] = []
-        content_llm: str = ""
-
-        logging.info("[combine_answers_node] Combining raw documents.")
-        combined_docs_list = state.get("combined_documents") or []
-
-        if combined_docs_list:
-            temp_lines = []
-            for doc in combined_docs_list:
-                fname = doc.metadata.get("file_name", "unknown")
-                page = doc.metadata.get("page", "N/A")
-                temp_lines.append(
-                    f"--- File: {fname} | Page: {page} ---\n{doc.page_content}"
-                )
-            content_llm = "\n\n".join(temp_lines)
-        else:
-            content_llm = raw_docs_for_synthesis if raw_docs_for_synthesis else "No raw documents."
-
-        # Track files with no docs
-        docs_by_file = state.get("documents_by_file", {})
-        if allowed_files:
-            for af in allowed_files:
-                if not docs_by_file.get(af):
-                    no_info_list.append(f"`{af}` (no chunks extracted)")
-        error_list.append("Error tracking for raw path not detailed here.")
-
-        if content_llm and (output_generation == "Error during synthesis." or True):
-            # Get streaming callback from state
+        if batch_results and len(batch_results) > 1:
+            # Multiple batches were processed, combine the results
+            logging.info(f"[combine_answers_node] Combining {len(batch_results)} batch results")
+            
+            detailed_flag = state.get("detailed_response_desired", True)
+            llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
             streaming_callback = state.get("streaming_callback")
-
-            # Use streaming generation
+            
+            # Create a final synthesis prompt for combining batch results
+            batch_combination_prompt = PromptTemplate(
+                template=(
+                    "You are an expert AI assistant. Combine the following batch responses "
+                    "into a single comprehensive answer.\n\n"
+                    "User's Question: {question}\n\n"
+                    "Batch Responses:\n{formatted_answers_or_raw_docs}\n\n"
+                    "Conversation History: {conversation_history}\n\n"
+                    "Instructions: Synthesize the batch responses into a coherent, "
+                    "comprehensive answer that addresses the user's question. "
+                    "Maintain all relevant information from each batch. "
+                    "Structure the response logically and avoid repetition.\n\n"
+                    "Combined Answer:"
+                ),
+                input_variables=["question", "formatted_answers_or_raw_docs", "conversation_history"]
+            )
+            
+            # Format batch results
+            formatted_batches = []
+            for i, result in enumerate(batch_results):
+                formatted_batches.append(f"--- Batch {i+1} ---\n{result}")
+            combined_content = "\n\n".join(formatted_batches)
+            
+            # Generate final combined response
             output_generation = await _stream_final_generation(
                 question=question,
-                content_llm=content_llm,
+                content_llm=combined_content,
                 llm_instance=llm_instance,
-                combo_prompt=combo_prompt,
+                combo_prompt=batch_combination_prompt,
                 conversation_history_str=conversation_history_str,
-                no_info_list=no_info_list,
-                error_list=error_list,
+                no_info_list=[],  # Already handled in batches
+                error_list=[],    # Already handled in batches
                 streaming_callback=streaming_callback
             )
+            
+        elif batch_results and len(batch_results) == 1:
+            # Single batch was processed, use the result directly
+            logging.info("[combine_answers_node] Using single batch result")
+            output_generation = batch_results[0]
+            
+        else:
+            # No batch processing occurred, use traditional single-batch approach
+            logging.info("[combine_answers_node] Using traditional single-batch processing")
+            
+            detailed_flag = state.get("detailed_response_desired", True)
+            llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
+            combo_prompt = get_synthesis_prompt_template()
+            streaming_callback = state.get("streaming_callback")
+
+            no_info_list: List[str] = []
+            error_list: List[str] = []
+            content_llm: str = ""
+
+            combined_docs_list = state.get("combined_documents") or []
+
+            if combined_docs_list:
+                temp_lines = []
+                for doc in combined_docs_list:
+                    fname = doc.metadata.get("file_name", "unknown")
+                    page = doc.metadata.get("page", "N/A")
+                    temp_lines.append(
+                        f"--- File: {fname} | Page: {page} ---\n{doc.page_content}"
+                    )
+                content_llm = "\n\n".join(temp_lines)
+            else:
+                content_llm = state.get("raw_documents_for_synthesis", "No raw documents.")
+
+            # Track files with no docs
+            docs_by_file = state.get("documents_by_file", {})
+            if allowed_files:
+                for af in allowed_files:
+                    if not docs_by_file.get(af):
+                        no_info_list.append(f"`{af}` (no chunks extracted)")
+            error_list.append("Error tracking for raw path not detailed here.")
+
+            if content_llm:
+                output_generation = await _stream_final_generation(
+                    question=question,
+                    content_llm=content_llm,
+                    llm_instance=llm_instance,
+                    combo_prompt=combo_prompt,
+                    conversation_history_str=conversation_history_str,
+                    no_info_list=no_info_list,
+                    error_list=error_list,
+                    streaming_callback=streaming_callback
+                )
 
     state_to_return["generation"] = output_generation
     _log_node_end("combine_answers_node", start_time)
@@ -1036,6 +1453,7 @@ def create_graph_app() -> Graph:
     workflow.add_node("generate_multi_queries_node", generate_multi_queries_node)
     workflow.add_node("extract_documents_node", extract_documents_parallel_node)
     workflow.add_node("format_raw_documents_node", format_raw_documents_for_synthesis_node)
+    workflow.add_node("process_batches_node", process_batches_node)
     workflow.add_node("combine_answers_node", combine_answers_node)
 
     workflow.set_entry_point("instantiate_embeddings_node")
@@ -1046,7 +1464,8 @@ def create_graph_app() -> Graph:
     workflow.add_edge("instantiate_retriever_node", "generate_multi_queries_node")
     workflow.add_edge("generate_multi_queries_node", "extract_documents_node")
     workflow.add_edge("extract_documents_node", "format_raw_documents_node")
-    workflow.add_edge("format_raw_documents_node", "combine_answers_node")
+    workflow.add_edge("format_raw_documents_node", "process_batches_node")
+    workflow.add_edge("process_batches_node", "combine_answers_node")
     workflow.add_edge("combine_answers_node", END)
 
     return workflow.compile()

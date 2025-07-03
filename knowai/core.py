@@ -91,6 +91,11 @@ class KnowAIAgent:
     initial_state_overrides : Optional[Dict[str, Any]], default ``None``
         Mapping of ``GraphState`` keys to override their default initial
         values. Unknown keys are ignored with a warning.
+    log_graph : bool, default ``False``
+        Whether to log the Mermaid diagram of the workflow graph.
+    use_accurate_token_counting : bool, default ``True``
+        Whether to use tiktoken for accurate token counting when available.
+        Falls back to heuristic estimation if tiktoken is not available.
 
     Attributes
     ----------
@@ -110,7 +115,8 @@ class KnowAIAgent:
         k_chunks_retriever_all_docs: int = K_CHUNKS_RETRIEVER_ALL_DOCS_DEFAULT,
         env_file_path: Optional[str] = None,
         initial_state_overrides: Optional[Dict[str, Any]] = None,
-        log_graph: bool = False
+        log_graph: bool = False,
+        use_accurate_token_counting: bool = True
     ) -> None:
         if env_file_path and os.path.exists(env_file_path):
             load_dotenv(dotenv_path=env_file_path)
@@ -150,6 +156,9 @@ class KnowAIAgent:
             "query_embeddings": None,
             "streaming_callback": None,
             "__progress_cb__": None,
+            "max_tokens_per_batch": int(1_000_000 * 0.9),  # GPT-4.1 with 10% safety margin
+            "batch_results": None,
+            "use_accurate_token_counting": use_accurate_token_counting,
         }
 
         if initial_state_overrides:
@@ -273,6 +282,7 @@ class KnowAIAgent:
         if user_question:
             self.session_state["documents_by_file"] = None
             self.session_state["raw_documents_for_synthesis"] = None
+            self.session_state["batch_results"] = None
 
         updated_state = await self.graph_app.ainvoke(self.session_state)  # type: ignore
         self.session_state.update(updated_state)  # type: ignore

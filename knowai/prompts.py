@@ -72,6 +72,7 @@ PROGRESS_MESSAGES = {
         "format_raw": "Preparing documents for analysis..."
     },
     "synthesis": {
+        "process_batches": "Processing documents in batches...",
         "combine_answers": "Synthesizing final response..."
     }
 }
@@ -105,6 +106,7 @@ def get_progress_message(stage: str, node: str) -> str:
         "generate_multi_queries_node": "multi_queries",
         "extract_documents_node": "extraction",
         "format_raw_documents_for_synthesis_node": "format_raw",
+        "process_batches_node": "process_batches",
         "combine_answers_node": "combine_answers"
     }
     
