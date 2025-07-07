@@ -8,7 +8,7 @@ import logging
 import os
 import time
 import re
-from typing import List, TypedDict, Dict, Optional, Callable, Tuple
+from typing import List, TypedDict, Dict, Optional, Callable, Tuple, Any
 
 from langchain_community.vectorstores import FAISS
 from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
@@ -36,6 +36,8 @@ from .prompts import (
     get_progress_message
 )
 
+# Add at the top of the file
+GLOBAL_PROGRESS_CB = None
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +53,7 @@ MAX_COMPLETION_TOKENS = 32768  # Maximum tokens for completion
 MAX_CONCURRENT_LLM_CALLS = 10  # Limit concurrent LLM calls to 10
 
 
-def get_tokenizer():
+def get_tokenizer(encoding: str = "cl100k_base"):
     """
     Get the appropriate tokenizer based on availability and configuration.
     
@@ -63,7 +65,7 @@ def get_tokenizer():
     if USE_ACCURATE_TOKEN_COUNTING and TIKTOKEN_AVAILABLE:
         try:
             # Use cl100k_base encoding which is used by GPT-4
-            return tiktoken.get_encoding("cl100k_base")
+            return tiktoken.get_encoding(encoding)
         except Exception as e:
             logging.warning(f"Failed to initialize tiktoken: {e}. Falling back to heuristic estimation.")
             return None
@@ -310,9 +312,6 @@ class GraphState(TypedDict):
         Total chunks to retrieve for the base retriever.
     k_chunks_retriever_all_docs : int
         Total documents to fetch internally for filtering.
-    combine_threshold : int
-        Maximum number of individual answers that may be combined in a
-        single batch before hierarchical combining is used.
     generated_queries : Optional[List[str]]
         List of generated alternative queries.
     query_embeddings : Optional[List[List[float]]]
@@ -348,7 +347,6 @@ class GraphState(TypedDict):
     detailed_response_desired: Optional[bool]
     k_chunks_retriever: int
     k_chunks_retriever_all_docs: int
-    combine_threshold: int
     generated_queries: Optional[List[str]]
     query_embeddings: Optional[List[List[float]]]
     streaming_callback: Optional[Callable[[str], None]]
@@ -423,7 +421,8 @@ def _log_node_end(node_name: str, start_time: float) -> None:
 def _update_progress_callback(
     state: GraphState,
     node_name: str,
-    stage: str
+    stage: str,
+    metadata: Optional[Dict[str, Any]] = None
 ) -> None:
     """
     Update progress callback if available in state.
@@ -436,14 +435,60 @@ def _update_progress_callback(
         Name of the current node.
     stage : str
         Current processing stage.
+    metadata : Optional[Dict[str, Any]]
+        Additional metadata for progress updates (e.g., counters).
     """
+    # Add debugging
+    #print(f"[DEBUG] _update_progress_callback called: node={node_name}, stage={stage}")
+    
+    # Try to get progress callback from state first, then fall back to global
     progress_cb = state.get("__progress_cb__")
+    if not progress_cb:
+        global GLOBAL_PROGRESS_CB
+        progress_cb = GLOBAL_PROGRESS_CB
+    
+    #print(f"[DEBUG] Progress callback exists: {progress_cb is not None}")
+    
     if progress_cb:
-        progress_cb(
-            get_progress_message(stage, node_name),
-            "info",
-            {"node": node_name, "stage": stage}
-        )
+        # Get the base progress message
+        base_message = get_progress_message(stage, node_name)
+        #print(f"[DEBUG] Base message: {base_message}")
+        
+        # If we have metadata with counters, use a custom message
+        if metadata and "completed" in metadata and "total" in metadata:
+            completed = metadata["completed"]
+            total = metadata["total"]
+            if "current_batch" in metadata:
+                # Batch processing
+                current_batch = metadata["current_batch"]
+                message = f"Processing batch {current_batch} of {total}..."
+            elif completed == 0:
+                # Individual file processing - starting
+                message = f"Starting to process {total} files individually..."
+            elif completed == total:
+                # Individual file processing - completed
+                message = f"Completed processing {completed} files successfully"
+            else:
+                # Individual file processing - in progress
+                message = f"Processing {completed} of {total} files..."
+        else:
+            message = base_message
+        
+        #print(f"[DEBUG] Final message: {message}")
+        
+        try:
+            progress_cb(
+                message,
+                "info",
+                {"node": node_name, "stage": stage, **(metadata or {})}
+            )
+            #print(f"[DEBUG] Progress callback executed successfully")
+        except Exception as e:
+            #print(f"[DEBUG] Error in progress callback: {e}")
+            pass
+    else:
+        pass
+        #print(f"[DEBUG] No progress callback found in state")
 
 
 def instantiate_embeddings(state: GraphState) -> GraphState:
@@ -1237,7 +1282,8 @@ async def process_batches_node(state: GraphState) -> GraphState:
             _update_progress_callback(
                 state, 
                 "process_batches_node", 
-                f"processing_batch_{i+1}_{len(batches)}"
+                f"processing_batch_{i+1}_{len(batches)}",
+                {"completed": i, "total": len(batches), "current_batch": i+1}
             )
             
             # Format batch content
@@ -1438,7 +1484,7 @@ async def combine_answers_node(state: GraphState) -> GraphState:
         Current mutable graph state containing (among others) the keys
         ``question``, ``allowed_files``, ``raw_documents_for_synthesis``,
         ``batch_results``, ``individual_file_responses``, ``process_files_individually``,
-        ``combine_threshold``, and ``conversation_history``.
+        and ``conversation_history``.
 
     Returns
     -------
@@ -1664,7 +1710,24 @@ async def process_individual_files_node(state: GraphState) -> GraphState:
     # Limit concurrent LLM calls to 10
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_LLM_CALLS)
     
-    logging.info(f"[process_individual_files_node] Processing {len(allowed_files)} files asynchronously (max {MAX_CONCURRENT_LLM_CALLS} concurrent)")
+    total_files = len(allowed_files)
+    logging.info(f"[process_individual_files_node] Processing {total_files} files asynchronously (max {MAX_CONCURRENT_LLM_CALLS} concurrent)")
+    
+    # Progress tracking
+    completed_files = 0
+    progress_lock = asyncio.Lock()
+    
+    async def update_progress():
+        """Update progress callback with current completion status."""
+        nonlocal completed_files
+        async with progress_lock:
+            completed_files += 1
+            _update_progress_callback(
+                state, 
+                "process_individual_files_node", 
+                "individual_processing",
+                {"completed": completed_files, "total": total_files}
+            )
     
     async def process_single_file(filename: str) -> tuple[str, str]:
         """
@@ -1688,6 +1751,7 @@ async def process_individual_files_node(state: GraphState) -> GraphState:
                 
                 if not docs_list:
                     logging.info(f"[process_individual_files_node] No documents found for {filename}")
+                    await update_progress()
                     return filename, f"No relevant information found in {filename}."
                 
                 # Format documents for this file
@@ -1718,6 +1782,7 @@ async def process_individual_files_node(state: GraphState) -> GraphState:
                     )
                     
                     logging.info(f"[process_individual_files_node] Completed async processing for {filename} ({len(file_response)} chars)")
+                    await update_progress()
                     return filename, file_response
                     
                 except Exception as e:
@@ -1735,6 +1800,7 @@ async def process_individual_files_node(state: GraphState) -> GraphState:
                     if hasattr(e, 'body'):
                         logging.error(f"[process_individual_files_node] Response Body: {e.body}")
                     
+                    await update_progress()
                     return filename, error_msg
                     
         except Exception as outer_e:
@@ -1743,11 +1809,20 @@ async def process_individual_files_node(state: GraphState) -> GraphState:
             logging.error(f"[process_individual_files_node] {error_msg}")
             logging.error(f"[process_individual_files_node] Outer error type: {type(outer_e).__name__}")
             logging.error(f"[process_individual_files_node] Outer error details: {outer_e}")
+            await update_progress()
             return filename, error_msg
     
     try:
+        # Initial progress update
+        _update_progress_callback(
+            state, 
+            "process_individual_files_node", 
+            "individual_processing",
+            {"completed": 0, "total": total_files}
+        )
+        
         # Process all files asynchronously with concurrency control
-        logging.info(f"[process_individual_files_node] Creating {len(allowed_files)} async tasks")
+        logging.info(f"[process_individual_files_node] Creating {total_files} async tasks")
         tasks = [process_single_file(filename) for filename in allowed_files]
         
         logging.info(f"[process_individual_files_node] Starting asyncio.gather with {len(tasks)} tasks")
@@ -1787,6 +1862,14 @@ async def process_individual_files_node(state: GraphState) -> GraphState:
     
     logging.info(f"[process_individual_files_node] Processing summary: {successful_files} successful, {failed_files} failed")
     logging.info(f"[process_individual_files_node] Completed async processing for {len(individual_responses)} files")
+    
+    # Final progress update
+    _update_progress_callback(
+        state, 
+        "process_individual_files_node", 
+        "individual_processing",
+        {"completed": len(individual_responses), "total": total_files}
+    )
     
     _log_node_end("process_individual_files_node", start_time)
     return {**state, "individual_file_responses": individual_responses}

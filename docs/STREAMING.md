@@ -55,7 +55,6 @@ curl -X POST "http://localhost:8000/initialize" \
   -H "Content-Type: application/json" \
   -d '{
     "vectorstore_s3_uri": "/path/to/vectorstore",
-    "combine_threshold": 50,
     "max_conversation_turns": 20
   }'
 ```

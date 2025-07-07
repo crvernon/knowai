@@ -11,7 +11,7 @@ def patch_agent(monkeypatch):
     Monkey-patch KnowAIAgent to a dummy implementation for testing.
     """
     class DummyAgent:
-        def __init__(self, vectorstore_path, combine_threshold, max_conversation_turns):
+        def __init__(self, vectorstore_path, max_conversation_turns):
             # Store init parameters for verification if needed
             self.vectorstore_path = vectorstore_path
 

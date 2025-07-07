@@ -99,7 +99,6 @@ def test_initial_session_state(agent: "knowai.core.KnowAIAgent") -> None:  # typ
         "conversation_history",
         "raw_documents_for_synthesis",
         "k_chunks_retriever",
-        "combine_threshold",
     }
 
     assert required_keys.issubset(agent.session_state.keys())

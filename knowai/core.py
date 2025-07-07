@@ -9,10 +9,10 @@ from .agent import (
     GraphState,
     create_graph_app,
 )
+from knowai.agent import GLOBAL_PROGRESS_CB
 
 K_CHUNKS_RETRIEVER_DEFAULT = 20
 K_CHUNKS_RETRIEVER_ALL_DOCS_DEFAULT = 100000
-COMBINE_THRESHOLD_DEFAULT = 500
 MAX_CONVERSATION_TURNS_DEFAULT = 25
 N_QUERY_ALTERNATIVES_DEFAULT = 1
 
@@ -77,9 +77,6 @@ class KnowAIAgent:
     ----------
     vectorstore_path : str
         Path on disk to the FAISS vector‑store directory.
-    combine_threshold : int, default ``COMBINE_THRESHOLD_DEFAULT``
-        Maximum number of individual answers to combine in a single pass
-        before hierarchical chunking is used.
     max_conversation_turns : int, default ``MAX_CONVERSATION_TURNS_DEFAULT``
         Number of past turns to retain in ``session_state``.
     k_chunks_retriever : int, default ``K_CHUNKS_RETRIEVER_DEFAULT``
@@ -114,7 +111,6 @@ class KnowAIAgent:
     def __init__(
         self,
         vectorstore_path: str,
-        combine_threshold: int = COMBINE_THRESHOLD_DEFAULT,
         max_conversation_turns: int = MAX_CONVERSATION_TURNS_DEFAULT,
         k_chunks_retriever: int = K_CHUNKS_RETRIEVER_DEFAULT,
         k_chunks_retriever_all_docs: int = K_CHUNKS_RETRIEVER_ALL_DOCS_DEFAULT,
@@ -156,7 +152,6 @@ class KnowAIAgent:
             "combined_documents": None,
             "detailed_response_desired": True,
             "k_chunks_retriever": k_chunks_retriever,
-            "combine_threshold": combine_threshold,
             "k_chunks_retriever_all_docs": k_chunks_retriever_all_docs,
             "generated_queries": None,
             "query_embeddings": None,
@@ -271,6 +266,10 @@ class KnowAIAgent:
         self.session_state["__progress_cb__"] = progress_cb
         self.session_state["streaming_callback"] = streaming_callback
 
+        # Add debugging
+        print(f"[DEBUG] process_turn: progress_cb exists: {progress_cb is not None}")
+        print(f"[DEBUG] process_turn: __progress_cb__ in session_state: {self.session_state.get('__progress_cb__') is not None}")
+
         if detailed_response_desired is not None:
             self.session_state["detailed_response_desired"] = detailed_response_desired
 
@@ -290,8 +289,6 @@ class KnowAIAgent:
                     self.session_state[key] = []  # type: ignore
                 elif key == "k_chunks_retriever":
                     self.session_state[key] = K_CHUNKS_RETRIEVER_DEFAULT  # type: ignore
-                elif key == "combine_threshold":
-                    self.session_state[key] = COMBINE_THRESHOLD_DEFAULT  # type: ignore
                 else:
                     self.session_state[key] = None  # type: ignore
 
@@ -301,7 +298,16 @@ class KnowAIAgent:
             self.session_state["raw_documents_for_synthesis"] = None
             self.session_state["batch_results"] = None
 
-        updated_state = await self.graph_app.ainvoke(self.session_state)  # type: ignore
+        # Set global progress callback for workflow (must set on the *agent* module
+        # not just this local alias, otherwise the graph nodes will not see it)
+        import knowai.agent as _agent_mod  # late import to avoid circular issues
+
+        _agent_mod.GLOBAL_PROGRESS_CB = progress_cb
+        try:
+            updated_state = await self.graph_app.ainvoke(self.session_state)  # type: ignore
+        finally:
+            # Clear the callback on the agent module so it does not leak
+            _agent_mod.GLOBAL_PROGRESS_CB = None
         self.session_state.update(updated_state)  # type: ignore
 
         assistant_response_str = self.session_state.get(

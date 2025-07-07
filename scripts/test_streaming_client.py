@@ -18,7 +18,6 @@ async def test_streaming_api(base_url: str = "http://localhost:8000"):
         # Initialize session
         init_payload = {
             "vectorstore_s3_uri": "tests/fixtures/vectorstore",
-            "combine_threshold": 50,
             "max_conversation_turns": 20
         }
         

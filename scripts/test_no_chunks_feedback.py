@@ -37,7 +37,6 @@ async def test_no_chunks_feedback():
         detailed_response_desired=True,
         k_chunks_retriever=10,
         k_chunks_retriever_all_docs=50,
-        combine_threshold=3,
         n_alternatives=4,
         k_per_query=5
     )

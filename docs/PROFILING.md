@@ -151,7 +151,6 @@ agent = KnowAIAgent(
 agent = KnowAIAgent(
     vectorstore_path=vectorstore_path,
     k_chunks_retriever=10,  # Default is 20
-    combine_threshold=3,    # Default is 500
 )
 ```
 

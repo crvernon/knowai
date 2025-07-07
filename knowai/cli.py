@@ -36,8 +36,6 @@ class InitPayload(BaseModel):
     Attributes:
         vectorstore_s3_uri (str): URI of the vectorstore, either an S3 URI
             (e.g., "s3://bucket/path") or a local filesystem path.
-        combine_threshold (Optional[int]): Threshold for combining
-            intermediate results. Defaults to None for the agent's default.
         max_conversation_turns (Optional[int]): Maximum number of past
             conversation turns to retain. Defaults to None for the agent's
             default.
@@ -45,7 +43,6 @@ class InitPayload(BaseModel):
             for accurate token counting when available. Defaults to True.
     """
     vectorstore_s3_uri: str
-    combine_threshold: Optional[int] = None
     max_conversation_turns: Optional[int] = None
     use_accurate_token_counting: Optional[bool] = True
 
@@ -132,8 +129,7 @@ async def initialize(payload: InitPayload):
 
     Args:
         payload (InitPayload): Initialization parameters, including the
-            vectorstore URI (S3 or local), combine threshold, and maximum
-            conversation turns.
+            vectorstore URI (S3 or local) and maximum conversation turns.
 
     Returns:
         dict: A JSON-serializable dict containing:
@@ -147,7 +143,6 @@ async def initialize(payload: InitPayload):
         vec_path = uri
     agent = KnowAIAgent(
         vectorstore_path=vec_path,
-        combine_threshold=payload.combine_threshold or 50,
         max_conversation_turns=payload.max_conversation_turns or 20,
         use_accurate_token_counting=payload.use_accurate_token_counting,
     )

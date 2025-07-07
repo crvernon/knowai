@@ -76,7 +76,7 @@ PROGRESS_MESSAGES = {
         "combine_answers": "Synthesizing final response..."
     },
     "individual_processing": {
-        "process_individual_files": "Processing files asynchronously...",
+        "process_individual_files": "Processing files individually...",
         "individual_processing_file_1_2": "Processing file 1 of 2...",
         "individual_processing_file_2_2": "Processing file 2 of 2...",
         "individual_processing_file_1_3": "Processing file 1 of 3...",
@@ -94,6 +94,15 @@ PROGRESS_MESSAGES = {
     },
     "processing_batch_2_2": {
         "processing": "Processing batch 2 of 2..."
+    },
+    "processing_batch_1_3": {
+        "processing": "Processing batch 1 of 3..."
+    },
+    "processing_batch_2_3": {
+        "processing": "Processing batch 2 of 3..."
+    },
+    "processing_batch_3_3": {
+        "processing": "Processing batch 3 of 3..."
     },
     "consolidating_individual_responses": {
         "consolidating": "Consolidating individual file responses..."
