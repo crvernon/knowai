@@ -25,6 +25,38 @@ RAW_DOCUMENTS_SYNTHESIS_PROMPT = (
 )
 
 
+# Consolidation Prompt for Individual File Responses
+INDIVIDUAL_FILE_CONSOLIDATION_PROMPT = (
+    "You are an expert AI assistant. Consolidate the following individual file responses "
+    "into a single comprehensive answer.\n\n"
+    "User's Question: {question}\n\n"
+    "Individual File Responses:\n{formatted_answers_or_raw_docs}\n\n"
+    "Conversation History: {conversation_history}\n\n"
+    "Instructions: Synthesize the individual file responses into a coherent, "
+    "comprehensive answer that addresses the user's question. "
+    "Maintain all relevant information from each file response. "
+    "Structure the response logically and avoid repetition. "
+    "When referencing information, cite the specific file it came from. "
+    "If some files had no relevant information, acknowledge this clearly.\n\n"
+    "Consolidated Answer:"
+)
+
+
+# Batch Combination Prompt for Multiple Batch Results
+BATCH_COMBINATION_PROMPT = (
+    "You are an expert AI assistant. Combine the following batch responses "
+    "into a single comprehensive answer.\n\n"
+    "User's Question: {question}\n\n"
+    "Batch Responses:\n{formatted_answers_or_raw_docs}\n\n"
+    "Conversation History: {conversation_history}\n\n"
+    "Instructions: Synthesize the batch responses into a coherent, "
+    "comprehensive answer that addresses the user's question. "
+    "Maintain all relevant information from each batch. "
+    "Structure the response logically and avoid repetition.\n\n"
+    "Combined Answer:"
+)
+
+
 def get_synthesis_prompt_template() -> PromptTemplate:
     """
     Get the synthesis prompt template for raw documents.
@@ -41,6 +73,44 @@ def get_synthesis_prompt_template() -> PromptTemplate:
             "formatted_answers_or_raw_docs", 
             "files_no_info", 
             "files_errors", 
+            "conversation_history"
+        ]
+    )
+
+
+def get_consolidation_prompt_template() -> PromptTemplate:
+    """
+    Get the consolidation prompt template for individual file responses.
+    
+    Returns
+    -------
+    PromptTemplate
+        The prompt template for consolidating individual file responses
+    """
+    return PromptTemplate(
+        template=INDIVIDUAL_FILE_CONSOLIDATION_PROMPT,
+        input_variables=[
+            "question", 
+            "formatted_answers_or_raw_docs", 
+            "conversation_history"
+        ]
+    )
+
+
+def get_batch_combination_prompt_template() -> PromptTemplate:
+    """
+    Get the batch combination prompt template for multiple batch results.
+    
+    Returns
+    -------
+    PromptTemplate
+        The prompt template for combining batch results
+    """
+    return PromptTemplate(
+        template=BATCH_COMBINATION_PROMPT,
+        input_variables=[
+            "question", 
+            "formatted_answers_or_raw_docs", 
             "conversation_history"
         ]
     )

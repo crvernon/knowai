@@ -18,6 +18,7 @@ from langchain_core.language_models import BaseLanguageModel
 from langchain_core.vectorstores import VectorStoreRetriever
 from langchain_core.embeddings import Embeddings as LangchainEmbeddings
 from langchain_core.prompts import PromptTemplate
+
 from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph as Graph
@@ -32,6 +33,8 @@ except ImportError:
 
 from .prompts import (
     get_synthesis_prompt_template,
+    get_consolidation_prompt_template,
+    get_batch_combination_prompt_template,
     CONTENT_POLICY_MESSAGE,
     get_progress_message
 )
@@ -1523,24 +1526,8 @@ async def combine_answers_node(state: GraphState) -> GraphState:
             llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
             streaming_callback = state.get("streaming_callback")
             
-            # Create a consolidation prompt for individual file responses
-            consolidation_prompt = PromptTemplate(
-                template=(
-                    "You are an expert AI assistant. Consolidate the following individual file responses "
-                    "into a single comprehensive answer.\n\n"
-                    "User's Question: {question}\n\n"
-                    "Individual File Responses:\n{formatted_answers_or_raw_docs}\n\n"
-                    "Conversation History: {conversation_history}\n\n"
-                    "Instructions: Synthesize the individual file responses into a coherent, "
-                    "comprehensive answer that addresses the user's question. "
-                    "Maintain all relevant information from each file response. "
-                    "Structure the response logically and avoid repetition. "
-                    "When referencing information, cite the specific file it came from. "
-                    "If some files had no relevant information, acknowledge this clearly.\n\n"
-                    "Consolidated Answer:"
-                ),
-                input_variables=["question", "formatted_answers_or_raw_docs", "conversation_history"]
-            )
+            # Get consolidation prompt for individual file responses
+            consolidation_prompt = get_consolidation_prompt_template()
             
             # Format individual file responses
             formatted_responses = []
@@ -1574,22 +1561,8 @@ async def combine_answers_node(state: GraphState) -> GraphState:
             llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
             streaming_callback = state.get("streaming_callback")
             
-            # Create a final synthesis prompt for combining batch results
-            batch_combination_prompt = PromptTemplate(
-                template=(
-                    "You are an expert AI assistant. Combine the following batch responses "
-                    "into a single comprehensive answer.\n\n"
-                    "User's Question: {question}\n\n"
-                    "Batch Responses:\n{formatted_answers_or_raw_docs}\n\n"
-                    "Conversation History: {conversation_history}\n\n"
-                    "Instructions: Synthesize the batch responses into a coherent, "
-                    "comprehensive answer that addresses the user's question. "
-                    "Maintain all relevant information from each batch. "
-                    "Structure the response logically and avoid repetition.\n\n"
-                    "Combined Answer:"
-                ),
-                input_variables=["question", "formatted_answers_or_raw_docs", "conversation_history"]
-            )
+            # Get batch combination prompt for combining batch results
+            batch_combination_prompt = get_batch_combination_prompt_template()
             
             # Format batch results
             formatted_batches = []
