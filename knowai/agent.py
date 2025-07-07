@@ -35,6 +35,7 @@ from .prompts import (
     get_synthesis_prompt_template,
     get_consolidation_prompt_template,
     get_batch_combination_prompt_template,
+    get_hierarchical_consolidation_prompt_template,
     CONTENT_POLICY_MESSAGE,
     get_progress_message
 )
@@ -331,6 +332,8 @@ class GraphState(TypedDict):
         Whether to process each file individually and then consolidate responses.
     individual_file_responses : Optional[Dict[str, str]]
         Mapping of filenames to their individual LLM responses.
+    hierarchical_consolidation_results : Optional[List[str]]
+        Results from hierarchical consolidation of individual file responses in batches of 10.
     """
     embeddings: Optional[LangchainEmbeddings]
     vectorstore_path: str
@@ -358,6 +361,7 @@ class GraphState(TypedDict):
     use_accurate_token_counting: bool
     process_files_individually: bool
     individual_file_responses: Optional[Dict[str, str]]
+    hierarchical_consolidation_results: Optional[List[str]]
 
 
 def _is_content_policy_error(e: Exception) -> bool:
@@ -464,10 +468,10 @@ def _update_progress_callback(
             if "current_batch" in metadata:
                 # Batch processing
                 current_batch = metadata["current_batch"]
-                message = f"Processing batch {current_batch} of {total}..."
+                message = f"Summarizing document batch {current_batch} of {total}..."
             elif completed == 0:
                 # Individual file processing - starting
-                message = f"Starting to process {total} files individually..."
+                message = f"Starting to process {total} files asynchronously in batches of {MAX_CONCURRENT_LLM_CALLS}..."
             elif completed == total:
                 # Individual file processing - completed
                 message = f"Completed processing {completed} files successfully"
@@ -1365,7 +1369,8 @@ async def _stream_final_generation(
     conversation_history_str: str,
     no_info_list: List[str],
     error_list: List[str],
-    streaming_callback: Optional[Callable[[str], None]]
+    streaming_callback: Optional[Callable[[str], None]],
+    additional_variables: Optional[Dict[str, Any]] = None
 ) -> str:
     """
     Stream the final generation using the LLM with a callback for real-time updates.
@@ -1408,6 +1413,10 @@ async def _stream_final_generation(
             "files_errors": ", ".join(error_list) if error_list else "None",
             "conversation_history": conversation_history_str
         }
+        
+        # Add additional variables if provided
+        if additional_variables:
+            input_data.update(additional_variables)
         
         logging.info(f"[_stream_final_generation] Input data prepared - question length: {len(question)}, content length: {len(content_llm)}")
 
@@ -1518,39 +1527,78 @@ async def combine_answers_node(state: GraphState) -> GraphState:
         conversation_history_str = _format_conversation_history(conversation_history)
 
         if process_files_individually and individual_file_responses:
-            # Individual file processing mode - consolidate individual responses
-            logging.info(f"[combine_answers_node] Consolidating {len(individual_file_responses)} individual file responses")
-            _update_progress_callback(state, "combine_answers_node", "consolidating_individual_responses")
+            # Check if hierarchical consolidation was performed
+            hierarchical_results = state.get("hierarchical_consolidation_results")
             
-            detailed_flag = state.get("detailed_response_desired", True)
-            llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
-            streaming_callback = state.get("streaming_callback")
-            
-            # Get consolidation prompt for individual file responses
-            consolidation_prompt = get_consolidation_prompt_template()
-            
-            # Format individual file responses
-            formatted_responses = []
-            for filename in allowed_files:
-                if filename in individual_file_responses:
-                    response = individual_file_responses[filename]
-                    formatted_responses.append(f"--- File: {filename} ---\n{response}")
-                else:
-                    formatted_responses.append(f"--- File: {filename} ---\nNo response generated for this file.")
-            
-            combined_content = "\n\n".join(formatted_responses)
-            
-            # Generate final consolidated response
-            output_generation = await _stream_final_generation(
-                question=question,
-                content_llm=combined_content,
-                llm_instance=llm_instance,
-                combo_prompt=consolidation_prompt,
-                conversation_history_str=conversation_history_str,
-                no_info_list=[],  # Already handled in individual processing
-                error_list=[],    # Already handled in individual processing
-                streaming_callback=streaming_callback
-            )
+            if hierarchical_results and len(hierarchical_results) > 1:
+                # Use hierarchical consolidation results - combine the batch summaries
+                logging.info(f"[combine_answers_node] Combining {len(hierarchical_results)} hierarchical consolidation results")
+                _update_progress_callback(state, "combine_answers_node", "combining_hierarchical_results")
+                
+                detailed_flag = state.get("detailed_response_desired", True)
+                llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
+                streaming_callback = state.get("streaming_callback")
+                
+                # Get batch combination prompt for combining hierarchical results
+                batch_combination_prompt = get_batch_combination_prompt_template()
+                
+                # Format hierarchical results
+                formatted_batches = []
+                for i, result in enumerate(hierarchical_results):
+                    formatted_batches.append(f"--- Hierarchical Batch {i+1} ---\n{result}")
+                combined_content = "\n\n".join(formatted_batches)
+                
+                # Generate final combined response from hierarchical results
+                output_generation = await _stream_final_generation(
+                    question=question,
+                    content_llm=combined_content,
+                    llm_instance=llm_instance,
+                    combo_prompt=batch_combination_prompt,
+                    conversation_history_str=conversation_history_str,
+                    no_info_list=[],  # Already handled in hierarchical processing
+                    error_list=[],    # Already handled in hierarchical processing
+                    streaming_callback=streaming_callback
+                )
+                
+            elif hierarchical_results and len(hierarchical_results) == 1:
+                # Only one hierarchical batch - use it directly
+                logging.info("[combine_answers_node] Using single hierarchical consolidation result")
+                output_generation = hierarchical_results[0]
+                
+            else:
+                # No hierarchical consolidation - use traditional approach for ≤10 files
+                logging.info(f"[combine_answers_node] Consolidating {len(individual_file_responses)} individual file responses (traditional approach)")
+                _update_progress_callback(state, "combine_answers_node", "consolidating_individual_responses")
+                
+                detailed_flag = state.get("detailed_response_desired", True)
+                llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
+                streaming_callback = state.get("streaming_callback")
+                
+                # Get consolidation prompt for individual file responses
+                consolidation_prompt = get_consolidation_prompt_template()
+                
+                # Format individual file responses
+                formatted_responses = []
+                for filename in allowed_files:
+                    if filename in individual_file_responses:
+                        response = individual_file_responses[filename]
+                        formatted_responses.append(f"--- File: {filename} ---\n{response}")
+                    else:
+                        formatted_responses.append(f"--- File: {filename} ---\nNo response generated for this file.")
+                
+                combined_content = "\n\n".join(formatted_responses)
+                
+                # Generate final consolidated response
+                output_generation = await _stream_final_generation(
+                    question=question,
+                    content_llm=combined_content,
+                    llm_instance=llm_instance,
+                    combo_prompt=consolidation_prompt,
+                    conversation_history_str=conversation_history_str,
+                    no_info_list=[],  # Already handled in individual processing
+                    error_list=[],    # Already handled in individual processing
+                    streaming_callback=streaming_callback
+                )
             
         elif batch_results and len(batch_results) > 1:
             # Multiple batches were processed, combine the results
@@ -1879,6 +1927,7 @@ def create_graph_app() -> Graph:
     workflow.add_node("format_raw_documents_node", format_raw_documents_for_synthesis_node)
     workflow.add_node("process_batches_node", process_batches_node)
     workflow.add_node("process_individual_files_node", process_individual_files_node)
+    workflow.add_node("hierarchical_consolidation_node", hierarchical_consolidation_node)
     workflow.add_node("combine_answers_node", combine_answers_node)
 
     workflow.set_entry_point("instantiate_embeddings_node")
@@ -1908,7 +1957,130 @@ def create_graph_app() -> Graph:
         }
     )
     
-    workflow.add_edge("process_individual_files_node", "combine_answers_node")
+    # Add hierarchical consolidation step after individual file processing
+    workflow.add_edge("process_individual_files_node", "hierarchical_consolidation_node")
+    workflow.add_edge("hierarchical_consolidation_node", "combine_answers_node")
     workflow.add_edge("combine_answers_node", END)
 
     return workflow.compile()
+
+
+async def hierarchical_consolidation_node(state: GraphState) -> GraphState:
+    """
+    Consolidate individual file responses in batches of 10 to ensure all information is preserved.
+    
+    This node processes individual file responses in hierarchical batches of 10 documents each.
+    For example, if there are 29 documents, it will create 3 batch summaries:
+    - Batch 1: Documents 1-10
+    - Batch 2: Documents 11-20  
+    - Batch 3: Documents 21-29
+    
+    This ensures that no information is lost when processing many documents, as each batch
+    summary preserves all important details from its constituent files.
+    
+    Parameters
+    ----------
+    state : GraphState
+        Current mutable graph state containing individual file responses.
+        
+    Returns
+    -------
+    GraphState
+        Updated state with hierarchical consolidation results.
+    """
+    start_time = _log_node_start("hierarchical_consolidation_node")
+    _update_progress_callback(state, "hierarchical_consolidation_node", "hierarchical_consolidation")
+    
+    question = state.get("question")
+    allowed_files = state.get("allowed_files")
+    individual_file_responses = state.get("individual_file_responses", {})
+    conversation_history = state.get("conversation_history")
+    process_files_individually = state.get("process_files_individually", False)
+    
+    # Only run if we're in individual file processing mode and have responses
+    if not process_files_individually or not individual_file_responses or not allowed_files:
+        logging.info("[hierarchical_consolidation_node] Skipping - not in individual file processing mode or no responses")
+        return {**state, "hierarchical_consolidation_results": None}
+    
+    # Check if we have enough files to warrant hierarchical consolidation (more than 10)
+    if len(allowed_files) <= 10:
+        logging.info(f"[hierarchical_consolidation_node] Only {len(allowed_files)} files - no hierarchical consolidation needed")
+        return {**state, "hierarchical_consolidation_results": None}
+    
+    logging.info(f"[hierarchical_consolidation_node] Starting hierarchical consolidation for {len(allowed_files)} files")
+    
+    detailed_flag = state.get("detailed_response_desired", True)
+    llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
+    streaming_callback = state.get("streaming_callback")
+    conversation_history_str = _format_conversation_history(conversation_history)
+    
+    if not llm_instance:
+        logging.error("[hierarchical_consolidation_node] LLM instance not available")
+        return {**state, "hierarchical_consolidation_results": None}
+    
+    # Get the hierarchical consolidation prompt
+    hierarchical_prompt = get_hierarchical_consolidation_prompt_template()
+    
+    # Process files in batches of 10
+    BATCH_SIZE = 10
+    batch_results = []
+    total_batches = (len(allowed_files) + BATCH_SIZE - 1) // BATCH_SIZE  # Ceiling division
+    
+    logging.info(f"[hierarchical_consolidation_node] Processing {len(allowed_files)} files in {total_batches} batches of {BATCH_SIZE}")
+    
+    for batch_num in range(total_batches):
+        start_idx = batch_num * BATCH_SIZE
+        end_idx = min(start_idx + BATCH_SIZE, len(allowed_files))
+        batch_files = allowed_files[start_idx:end_idx]
+        
+        logging.info(f"[hierarchical_consolidation_node] Processing batch {batch_num + 1}/{total_batches} (files {start_idx + 1}-{end_idx})")
+        _update_progress_callback(
+            state, 
+            "hierarchical_consolidation_node", 
+            "hierarchical_consolidation",
+            {"completed": batch_num, "total": total_batches, "current_batch": batch_num + 1}
+        )
+        
+        # Format responses for this batch
+        batch_responses = []
+        for filename in batch_files:
+            if filename in individual_file_responses:
+                response = individual_file_responses[filename]
+                batch_responses.append(f"--- File: {filename} ---\n{response}")
+            else:
+                batch_responses.append(f"--- File: {filename} ---\nNo response generated for this file.")
+        
+        batch_content = "\n\n".join(batch_responses)
+        
+        # Generate consolidated summary for this batch
+        try:
+            batch_summary = await _stream_final_generation(
+                question=question,
+                content_llm=batch_content,
+                llm_instance=llm_instance,
+                combo_prompt=hierarchical_prompt,
+                conversation_history_str=conversation_history_str,
+                no_info_list=[],  # Already handled in individual processing
+                error_list=[],    # Already handled in individual processing
+                streaming_callback=None,  # Don't stream hierarchical consolidation
+                additional_variables={"batch_number": batch_num + 1}
+            )
+            
+            batch_results.append(batch_summary)
+            logging.info(f"[hierarchical_consolidation_node] Completed batch {batch_num + 1} ({len(batch_summary)} chars)")
+            
+        except Exception as e:
+            error_msg = f"Error consolidating batch {batch_num + 1}: {str(e)}"
+            logging.error(f"[hierarchical_consolidation_node] {error_msg}")
+            batch_results.append(error_msg)
+    
+    logging.info(f"[hierarchical_consolidation_node] Completed hierarchical consolidation - {len(batch_results)} batch summaries created")
+    _update_progress_callback(
+        state, 
+        "hierarchical_consolidation_node", 
+        "hierarchical_consolidation",
+        {"completed": total_batches, "total": total_batches}
+    )
+    
+    _log_node_end("hierarchical_consolidation_node", start_time)
+    return {**state, "hierarchical_consolidation_results": batch_results}

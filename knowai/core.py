@@ -162,6 +162,7 @@ class KnowAIAgent:
             "use_accurate_token_counting": use_accurate_token_counting,
             "process_files_individually": process_files_individually,
             "individual_file_responses": None,
+            "hierarchical_consolidation_results": None,
         }
 
         if initial_state_overrides:

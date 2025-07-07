@@ -35,8 +35,9 @@ INDIVIDUAL_FILE_CONSOLIDATION_PROMPT = (
     "Instructions: Synthesize the individual file responses into a coherent, "
     "comprehensive answer that addresses the user's question. "
     "Maintain all relevant information from each file response. "
+    "ALWAYS include specific citations when referencing information from files. "
+    "Use the format: (filename.pdf, Page X) or (filename.pdf) when citing content. "
     "Structure the response logically and avoid repetition. "
-    "When referencing information, cite the specific file it came from. "
     "If some files had no relevant information, acknowledge this clearly.\n\n"
     "Consolidated Answer:"
 )
@@ -52,8 +53,28 @@ BATCH_COMBINATION_PROMPT = (
     "Instructions: Synthesize the batch responses into a coherent, "
     "comprehensive answer that addresses the user's question. "
     "Maintain all relevant information from each batch. "
+    "ALWAYS include specific citations when referencing information from files. "
+    "Use the format: (filename.pdf, Page X) or (filename.pdf) when citing content. "
     "Structure the response logically and avoid repetition.\n\n"
     "Combined Answer:"
+)
+
+
+# Hierarchical Consolidation Prompt for Individual File Responses (Batches of 10)
+HIERARCHICAL_CONSOLIDATION_PROMPT = (
+    "You are an expert AI assistant. Consolidate the following individual file responses "
+    "into a comprehensive summary that preserves ALL important information from each file.\n\n"
+    "User's Question: {question}\n\n"
+    "Individual File Responses (Batch {batch_number}):\n{formatted_answers_or_raw_docs}\n\n"
+    "Conversation History: {conversation_history}\n\n"
+    "CRITICAL INSTRUCTIONS: This is a hierarchical consolidation step. Your task is to create a "
+    "comprehensive summary that includes ALL important information from each individual file response. "
+    "DO NOT omit any cited information, key findings, or important details. "
+    "ALWAYS include specific citations when referencing information from files. "
+    "Use the format: (filename.pdf, Page X) or (filename.pdf) when citing content. "
+    "Structure the response logically while ensuring every file's contribution is clearly represented. "
+    "If a file had no relevant information, acknowledge this explicitly.\n\n"
+    "Consolidated Summary for Batch {batch_number}:"
 )
 
 
@@ -112,6 +133,26 @@ def get_batch_combination_prompt_template() -> PromptTemplate:
             "question", 
             "formatted_answers_or_raw_docs", 
             "conversation_history"
+        ]
+    )
+
+
+def get_hierarchical_consolidation_prompt_template() -> PromptTemplate:
+    """
+    Get the hierarchical consolidation prompt template for individual file responses in batches of 10.
+    
+    Returns
+    -------
+    PromptTemplate
+        The prompt template for hierarchical consolidation of individual file responses
+    """
+    return PromptTemplate(
+        template=HIERARCHICAL_CONSOLIDATION_PROMPT,
+        input_variables=[
+            "question", 
+            "formatted_answers_or_raw_docs", 
+            "conversation_history",
+            "batch_number"
         ]
     )
 
