@@ -163,6 +163,7 @@ class KnowAIAgent:
             "process_files_individually": process_files_individually,
             "individual_file_responses": None,
             "hierarchical_consolidation_results": None,
+            "show_detailed_individual_responses": False,
         }
 
         if initial_state_overrides:
@@ -228,7 +229,8 @@ class KnowAIAgent:
         progress_cb: Optional[Callable[[str, str, Dict[str, Any]], None]] = None,
         detailed_response_desired: Optional[bool] = None,
         streaming_callback: Optional[Callable[[str], None]] = None,
-        process_files_individually: Optional[bool] = None
+        process_files_individually: Optional[bool] = None,
+        show_detailed_individual_responses: Optional[bool] = None
     ) -> Dict[str, Any]:
         """
         Processes a single conversational turn.
@@ -255,6 +257,10 @@ class KnowAIAgent:
             When True, each file is processed separately by the LLM and then
             all responses are combined into a final answer. When False, uses
             traditional batch processing approach.
+        show_detailed_individual_responses : Optional[bool]
+            Whether to include individual document responses in the final output.
+            When True, the response will include a section with detailed responses
+            from each individual document after the main summary.
 
         Returns:
             A dictionary containing:
@@ -281,6 +287,9 @@ class KnowAIAgent:
 
         if process_files_individually is not None:
             self.session_state["process_files_individually"] = process_files_individually
+
+        if show_detailed_individual_responses is not None:
+            self.session_state["show_detailed_individual_responses"] = show_detailed_individual_responses
 
         # Ensure all required GraphState keys are present
         for key in GraphState.__annotations__.keys():
@@ -310,6 +319,13 @@ class KnowAIAgent:
             # Clear the callback on the agent module so it does not leak
             _agent_mod.GLOBAL_PROGRESS_CB = None
         self.session_state.update(updated_state)  # type: ignore
+        
+        # Ensure detailed responses are properly transferred from workflow state
+        print(f"[DEBUG] Updated state keys: {list(updated_state.keys())}")
+        print(f"[DEBUG] detailed_responses_for_ui in updated_state: {updated_state.get('detailed_responses_for_ui', 'None')}")
+        if "detailed_responses_for_ui" in updated_state:
+            self.session_state["detailed_responses_for_ui"] = updated_state["detailed_responses_for_ui"]
+            print(f"[DEBUG] Transferred detailed_responses_for_ui to session state")
 
         assistant_response_str = self.session_state.get(
             "generation", "I'm sorry, I couldn't formulate a response."
@@ -322,15 +338,23 @@ class KnowAIAgent:
                 "provided information."
             )
 
+        # For conversation history, only include the main summary (before detailed responses)
+        history_response_str = assistant_response_str
+        if self.session_state.get("show_detailed_individual_responses", False):
+            # Remove the detailed responses section from history
+            detailed_section_start = assistant_response_str.find("\n\n" + "="*80 + "\n")
+            if detailed_section_start != -1:
+                history_response_str = assistant_response_str[:detailed_section_start]
+
         # Update conversation history
-        if user_question and assistant_response_str:
+        if user_question and history_response_str:
             current_history = self.session_state.get("conversation_history")
             if current_history is None:
                 current_history = []
 
             current_history.append({
                 "user_question": user_question,
-                "assistant_response": assistant_response_str
+                "assistant_response": history_response_str
             })
             self.session_state["conversation_history"] = current_history[-self.max_conversation_turns:]
             logging.info(
@@ -338,9 +362,13 @@ class KnowAIAgent:
                 f"{len(self.session_state['conversation_history'])}"
             )
 
+        # Get detailed responses from state if they exist
+        detailed_responses = self.session_state.get("detailed_responses_for_ui")
+
         # Return a dictionary with all necessary info for the UI
         return {
             "generation": assistant_response_str,
             "documents_by_file": self.session_state.get("documents_by_file"),
             "raw_documents_for_synthesis": self.session_state.get("raw_documents_for_synthesis"),
+            "detailed_responses": detailed_responses,
         }

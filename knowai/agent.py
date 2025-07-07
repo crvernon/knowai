@@ -55,7 +55,8 @@ CONVERSATION_HISTORY_BUFFER = 5000  # Buffer for conversation history
 USE_ACCURATE_TOKEN_COUNTING = True  # Default to using tiktoken when available
 MAX_COMPLETION_TOKENS = 32768  # Maximum tokens for completion
 MAX_CONCURRENT_LLM_CALLS = 10  # Limit concurrent LLM calls to 10
-
+MAX_FILES_FOR_HIERARCHICAL_CONSOLIDATION = 10  # Maximum number of files before using hierarchical consolidation
+HIERARCHICAL_CONSOLIDATION_BATCH_SIZE = 10  # Batch size for hierarchical consolidation
 
 def get_tokenizer(encoding: str = "cl100k_base"):
     """
@@ -334,6 +335,10 @@ class GraphState(TypedDict):
         Mapping of filenames to their individual LLM responses.
     hierarchical_consolidation_results : Optional[List[str]]
         Results from hierarchical consolidation of individual file responses in batches of 10.
+    show_detailed_individual_responses : bool
+        Whether to include individual document responses in the final output.
+    detailed_responses_for_ui : Optional[str]
+        Detailed individual responses formatted for UI display.
     """
     embeddings: Optional[LangchainEmbeddings]
     vectorstore_path: str
@@ -362,6 +367,8 @@ class GraphState(TypedDict):
     process_files_individually: bool
     individual_file_responses: Optional[Dict[str, str]]
     hierarchical_consolidation_results: Optional[List[str]]
+    show_detailed_individual_responses: bool
+    detailed_responses_for_ui: Optional[str]
 
 
 def _is_content_policy_error(e: Exception) -> bool:
@@ -468,10 +475,10 @@ def _update_progress_callback(
             if "current_batch" in metadata:
                 # Batch processing
                 current_batch = metadata["current_batch"]
-                message = f"Summarizing document batch {current_batch} of {total}..."
+                message = f"Summarizing individual response batch {current_batch} of {total}..."
             elif completed == 0:
                 # Individual file processing - starting
-                message = f"Starting to process {total} files asynchronously in batches of {MAX_CONCURRENT_LLM_CALLS}..."
+                message = f"Starting to process {total} files asynchronously {MAX_CONCURRENT_LLM_CALLS} at a time..."
             elif completed == total:
                 # Individual file processing - completed
                 message = f"Completed processing {completed} files successfully"
@@ -1513,6 +1520,7 @@ async def combine_answers_node(state: GraphState) -> GraphState:
     batch_results = state.get("batch_results")
     individual_file_responses = state.get("individual_file_responses", {})
     process_files_individually = state.get("process_files_individually", False)
+    show_detailed_individual_responses = state.get("show_detailed_individual_responses", False)
     output_generation: Optional[str] = "Error during synthesis."
     state_to_return = {**state}
 
@@ -1566,7 +1574,7 @@ async def combine_answers_node(state: GraphState) -> GraphState:
                 output_generation = hierarchical_results[0]
                 
             else:
-                # No hierarchical consolidation - use traditional approach for ≤10 files
+                # No hierarchical consolidation - use traditional approach for ≤n files
                 logging.info(f"[combine_answers_node] Consolidating {len(individual_file_responses)} individual file responses (traditional approach)")
                 _update_progress_callback(state, "combine_answers_node", "consolidating_individual_responses")
                 
@@ -1683,6 +1691,32 @@ async def combine_answers_node(state: GraphState) -> GraphState:
                     streaming_callback=streaming_callback
                 )
 
+    # Store individual responses separately for UI display
+    if show_detailed_individual_responses:
+        # Create the detailed responses section for separate display
+        detailed_section = "\n\n" + "="*80 + "\n"
+        detailed_section += "INDIVIDUAL DOCUMENT DETAILED RESPONSES\n"
+        detailed_section += "="*80 + "\n\n"
+        
+        if individual_file_responses and process_files_individually:
+            # Add each individual response
+            for filename in allowed_files:
+                if filename in individual_file_responses:
+                    response = individual_file_responses[filename]
+                    detailed_section += f"--- {filename} ---\n{response}\n\n"
+                else:
+                    detailed_section += f"--- {filename} ---\nNo response generated for this file.\n\n"
+        else:
+            # No individual responses available - show message
+            detailed_section += "Individual file responses are not available in the current processing mode.\n\n"
+            detailed_section += "To see individual responses:\n"
+            detailed_section += "1. Ensure 'Process files individually' is enabled\n"
+            detailed_section += "2. Make sure documents are available for processing\n"
+            detailed_section += "3. Check that the vectorstore contains indexed documents\n\n"
+        
+        # Store detailed responses in state for UI to access
+        state_to_return["detailed_responses_for_ui"] = detailed_section
+    
     state_to_return["generation"] = output_generation
     _log_node_end("combine_answers_node", start_time)
     return state_to_return
@@ -1694,7 +1728,7 @@ async def process_individual_files_node(state: GraphState) -> GraphState:
     
     This node takes the documents retrieved for each file and generates an
     individual LLM response for each file asynchronously in parallel, with
-    a maximum of 10 concurrent LLM calls to prevent overwhelming the service.
+    a maximum of n concurrent LLM calls to prevent overwhelming the service.
     The responses are stored in `individual_file_responses` for later consolidation.
     
     Parameters
@@ -1728,7 +1762,7 @@ async def process_individual_files_node(state: GraphState) -> GraphState:
     conversation_history_str = _format_conversation_history(conversation_history)
     combo_prompt = get_synthesis_prompt_template()
     
-    # Limit concurrent LLM calls to 10
+    # Limit concurrent LLM calls
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_LLM_CALLS)
     
     total_files = len(allowed_files)
@@ -1969,7 +2003,7 @@ async def hierarchical_consolidation_node(state: GraphState) -> GraphState:
     """
     Consolidate individual file responses in batches of 10 to ensure all information is preserved.
     
-    This node processes individual file responses in hierarchical batches of 10 documents each.
+    This node processes individual file responses in hierarchical batches of n documents each.
     For example, if there are 29 documents, it will create 3 batch summaries:
     - Batch 1: Documents 1-10
     - Batch 2: Documents 11-20  
@@ -2002,8 +2036,8 @@ async def hierarchical_consolidation_node(state: GraphState) -> GraphState:
         logging.info("[hierarchical_consolidation_node] Skipping - not in individual file processing mode or no responses")
         return {**state, "hierarchical_consolidation_results": None}
     
-    # Check if we have enough files to warrant hierarchical consolidation (more than 10)
-    if len(allowed_files) <= 10:
+    # Check if we have enough files to warrant hierarchical consolidation (more than n)
+    if len(allowed_files) <= MAX_FILES_FOR_HIERARCHICAL_CONSOLIDATION:
         logging.info(f"[hierarchical_consolidation_node] Only {len(allowed_files)} files - no hierarchical consolidation needed")
         return {**state, "hierarchical_consolidation_results": None}
     
@@ -2021,16 +2055,15 @@ async def hierarchical_consolidation_node(state: GraphState) -> GraphState:
     # Get the hierarchical consolidation prompt
     hierarchical_prompt = get_hierarchical_consolidation_prompt_template()
     
-    # Process files in batches of 10
-    BATCH_SIZE = 10
+    # Process files in batches of n
     batch_results = []
-    total_batches = (len(allowed_files) + BATCH_SIZE - 1) // BATCH_SIZE  # Ceiling division
+    total_batches = (len(allowed_files) + HIERARCHICAL_CONSOLIDATION_BATCH_SIZE - 1) // HIERARCHICAL_CONSOLIDATION_BATCH_SIZE  # Ceiling division
     
-    logging.info(f"[hierarchical_consolidation_node] Processing {len(allowed_files)} files in {total_batches} batches of {BATCH_SIZE}")
+    logging.info(f"[hierarchical_consolidation_node] Processing {len(allowed_files)} files in {total_batches} batches of {HIERARCHICAL_CONSOLIDATION_BATCH_SIZE}")
     
     for batch_num in range(total_batches):
-        start_idx = batch_num * BATCH_SIZE
-        end_idx = min(start_idx + BATCH_SIZE, len(allowed_files))
+        start_idx = batch_num * HIERARCHICAL_CONSOLIDATION_BATCH_SIZE
+        end_idx = min(start_idx + HIERARCHICAL_CONSOLIDATION_BATCH_SIZE, len(allowed_files))
         batch_files = allowed_files[start_idx:end_idx]
         
         logging.info(f"[hierarchical_consolidation_node] Processing batch {batch_num + 1}/{total_batches} (files {start_idx + 1}-{end_idx})")
