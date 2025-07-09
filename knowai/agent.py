@@ -7,13 +7,20 @@ import asyncio
 import logging
 import os
 import time
-import re
-from typing import List, TypedDict, Dict, Optional, Callable, Tuple, Any
+from typing import (
+    List, 
+    TypedDict, 
+    Dict, 
+    Optional, 
+    Callable, 
+    Tuple, 
+    Any
+)
 
 from langchain_community.vectorstores import FAISS
 from langchain_openai import AzureChatOpenAI, AzureOpenAIEmbeddings
-from langchain_core.documents import Document
 from langchain.retrievers.multi_query import MultiQueryRetriever
+from langchain_core.documents import Document
 from langchain_core.language_models import BaseLanguageModel
 from langchain_core.vectorstores import VectorStoreRetriever
 from langchain_core.embeddings import Embeddings as LangchainEmbeddings
@@ -21,10 +28,14 @@ from langchain_core.prompts import PromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph as Graph
-import tiktoken
+
+from .errors import (
+    handle_llm_error
+)
 
 from .utils import (
-    is_content_policy_error
+    estimate_tokens,
+    estimate_synthesis_tokens,
 )
 
 from .prompts import (
@@ -32,9 +43,6 @@ from .prompts import (
     get_consolidation_prompt_template,
     get_batch_combination_prompt_template,
     get_hierarchical_consolidation_prompt_template,
-    CONTENT_POLICY_MESSAGE,
-    RATE_LIMIT_MESSAGE,
-    TOKEN_LIMIT_MESSAGE,
     get_progress_message
 )
 
@@ -44,21 +52,9 @@ GLOBAL_PROGRESS_CB = None
 # instantiate logger
 logger = logging.getLogger(__name__)
 
-
-class RateLimitError(Exception):
-    """Custom exception for rate limit errors."""
-    pass
-
-
-class TokenLimitError(Exception):
-    """Custom exception for token limit errors."""
-    pass
-
-
 # Token management constants
 GPT4_1_CONTEXT_WINDOW = 1_000_000  # GPT-4.1 context window
 TOKEN_SAFETY_MARGIN = 0.1  # 10% safety margin
-CONVERSATION_HISTORY_BUFFER = 5000  # Buffer for conversation history
 MAX_COMPLETION_TOKENS = 32768  # Maximum tokens for completion
 MAX_CONCURRENT_LLM_CALLS = 10  # Limit concurrent LLM calls to 10
 MAX_FILES_FOR_HIERARCHICAL_CONSOLIDATION = 10  # Maximum number of files before using hierarchical consolidation
@@ -67,99 +63,6 @@ MAX_TOKENS_PER_HIERARCHICAL_BATCH = 100_000  # Maximum tokens per hierarchical c
 
 # Limit for per-file responses to avoid huge, slow outputs
 INDIVIDUAL_FILE_MAX_TOKENS = 4096  # tokens (≈ four-times characters)
-
-
-def get_tokenizer(encoding: str = "cl100k_base"):
-    """
-    Get the tiktoken tokenizer for accurate token counting.
-    
-    Returns
-    -------
-    Optional[tiktoken.Encoding]
-        tiktoken tokenizer if available, None otherwise.
-    """
-    try:
-        # Use cl100k_base encoding which is used by GPT-4
-        return tiktoken.get_encoding(encoding)
-    except Exception as e:
-        logging.warning(f"Failed to initialize tiktoken: {e}.")
-        return None
-
-
-def estimate_tokens(text: str) -> int:
-    """
-    Estimate the number of tokens in a text string using tiktoken.
-    
-    Parameters
-    ----------
-    text : str
-        The text to estimate tokens for.
-        
-    Returns
-    -------
-    int
-        Estimated number of tokens.
-    """
-    if not text:
-        return 0
-    
-    try:
-        tokenizer = get_tokenizer()
-        if tokenizer:
-            return len(tokenizer.encode(text))
-    except Exception as e:
-        logging.warning(f"tiktoken failed: {e}.")
-
-    # If tiktoken is not available or fails, raise an error
-    raise RuntimeError("Accurate token counting requires tiktoken to be installed. Please install tiktoken: pip install tiktoken")
-
-
-def estimate_synthesis_tokens(
-    question: str,
-    content: str,
-    conversation_history: str,
-    files_no_info: str,
-    files_errors: str
-) -> int:
-    """
-    Estimate total tokens for a synthesis operation using tiktoken.
-    
-    Parameters
-    ----------
-    question : str
-        The user's question.
-    content : str
-        The document content to synthesize.
-    conversation_history : str
-        Formatted conversation history.
-    files_no_info : str
-        List of files with no information.
-    files_errors : str
-        List of files with errors.
-        
-    Returns
-    -------
-    int
-        Estimated total tokens for the synthesis operation.
-    """
-    # Estimate tokens for each component
-    question_tokens = estimate_tokens(question)
-    content_tokens = estimate_tokens(content)
-    history_tokens = estimate_tokens(conversation_history)
-    no_info_tokens = estimate_tokens(files_no_info)
-    errors_tokens = estimate_tokens(files_errors)
-    
-    # Add system prompt and response buffer
-    total_tokens = (
-        question_tokens +
-        content_tokens +
-        history_tokens +
-        no_info_tokens +
-        errors_tokens +
-        CONVERSATION_HISTORY_BUFFER  # Buffer for response
-    )
-    
-    return total_tokens
 
 
 def create_content_batches(
@@ -467,153 +370,6 @@ class GraphState(TypedDict):
     rate_limit_error_occurred: bool
 
 
-def _is_content_policy_error(e: Exception) -> bool:
-    """
-    Determine whether an exception message indicates an AI content‑policy
-    violation.
-
-    Parameters
-    ----------
-    e : Exception
-        Exception raised by the LLM provider.
-
-    Returns
-    -------
-    bool
-        ``True`` if the exception message contains any keyword that signals
-        a policy‑related block; otherwise ``False``.
-    """
-    error_message = str(e).lower()
-    keywords = [
-        "content filter",
-        "content management policy",
-        "responsible ai",
-        "safety policy",
-        "prompt blocked"  # Common for Azure
-    ]
-    return any(keyword in error_message for keyword in keywords)
-
-
-def _is_rate_limit_error(e: Exception) -> bool:
-    """
-    Determine whether an exception indicates a rate limit (429) error.
-
-    Parameters
-    ----------
-    e : Exception
-        Exception raised by the LLM provider.
-
-    Returns
-    -------
-    bool
-        ``True`` if the exception indicates a rate limit error; otherwise ``False``.
-    """
-    # Check status code if available
-    if hasattr(e, 'status_code') and e.status_code == 429:
-        return True
-    
-    # Check error message for rate limit indicators
-    error_message = str(e).lower()
-    rate_limit_keywords = [
-        "rate limit",
-        "too many requests",
-        "429",
-        "quota exceeded",
-        "rate exceeded"
-    ]
-    return any(keyword in error_message for keyword in rate_limit_keywords)
-
-
-def _is_token_limit_error(e: Exception) -> bool:
-    """
-    Determine whether an exception indicates a token limit exceeded (400) error.
-
-    Parameters
-    ----------
-    e : Exception
-        Exception raised by the LLM provider.
-
-    Returns
-    -------
-    bool
-        ``True`` if the exception indicates a token limit error; otherwise ``False``.
-    """
-    error_message = str(e).lower()
-    token_limit_keywords = [
-        "token",
-        "context length",
-        "maximum context length",
-        "input too long",
-        "prompt too long",
-        "context window"
-    ]
-    
-    # Check if it's specifically a token limit error by keywords
-    if any(keyword in error_message for keyword in token_limit_keywords):
-        return True
-    
-    # Check status code if available (400 with any message)
-    if hasattr(e, 'status_code') and e.status_code == 400:
-        return True
-    
-    return False
-
-
-def _handle_llm_error(
-    e: Exception, 
-    streaming_callback: Optional[Callable[[str], None]] = None,
-    node_name: str = "unknown"
-) -> str:
-    """
-    Handle LLM errors and provide appropriate user feedback via callback.
-    
-    Parameters
-    ----------
-    e : Exception
-        The exception that occurred.
-    streaming_callback : Optional[Callable[[str], None]]
-        Callback function to inform the user of the error.
-    node_name : str
-        Name of the node where the error occurred.
-        
-    Returns
-    -------
-    str
-        Error message to return to the user.
-    """
-    if _is_rate_limit_error(e):
-        logging.warning(f"[{node_name}] Rate limit error: {e}")
-        
-        if streaming_callback:
-            streaming_callback(RATE_LIMIT_MESSAGE)
-        
-        # Raise custom exception to stop workflow
-        raise RateLimitError(RATE_LIMIT_MESSAGE)
-    
-    elif _is_token_limit_error(e):
-        logging.error(f"[{node_name}] Token limit error: {e}")
-        
-        if streaming_callback:
-            streaming_callback(TOKEN_LIMIT_MESSAGE)
-        
-        # Raise custom exception to stop workflow
-        raise TokenLimitError(TOKEN_LIMIT_MESSAGE)
-    
-    elif _is_content_policy_error(e):
-        logging.warning(f"[{node_name}] Content policy violation: {e}")
-        return CONTENT_POLICY_MESSAGE
-    
-    else:
-        # Generic error handling
-        error_message = f"An error occurred during processing: {str(e)}"
-        logging.error(f"[{node_name}] Generic error: {e}")
-        
-        if streaming_callback:
-            streaming_callback(error_message)
-        
-        return error_message
-
-
 def _log_node_start(node_name: str) -> float:
     """
     Log the start of a node execution and return the start time.
@@ -808,8 +564,6 @@ def instantiate_llm_large(state: GraphState) -> GraphState:
             
             deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
             api_version = os.getenv("AZURE_OPENAI_API_4p1_VERSION")
-            endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-            api_key = os.getenv("AZURE_OPENAI_API_KEY")
 
             new_llm = AzureChatOpenAI(
                 temperature=0.2,
@@ -875,8 +629,6 @@ def instantiate_llm_small(state: GraphState) -> GraphState:
             
             deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NANO")
             api_version = os.getenv("AZURE_OPENAI_API_4p1_VERSION")
-            endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-            api_key = os.getenv("AZURE_OPENAI_API_KEY")
 
             new_llm = AzureChatOpenAI(
                 temperature=0.2,
@@ -1201,7 +953,7 @@ async def generate_multi_queries_node(state: GraphState) -> GraphState:
             logging.error(f"[generate_multi_queries_node] Response Body: {e_query_gen.body}")
         
         # Use the new error handling function
-        error_msg = _handle_llm_error(e_query_gen, None, "generate_multi_queries_node")
+        error_msg = handle_llm_error(e_query_gen, None, "generate_multi_queries_node")
         logging.warning(f"[generate_multi_queries_node] {error_msg} - Using original question only.")
         # In all cases, we fall back to the original question
 
@@ -1715,7 +1467,7 @@ async def _stream_final_generation(
             logging.error(f"[_stream_final_generation] Response Body: {e.body}")
         
         # Use the new error handling function
-        return _handle_llm_error(e, streaming_callback, "_stream_final_generation")
+        return handle_llm_error(e, streaming_callback, "_stream_final_generation")
 
 
 async def combine_answers_node(state: GraphState) -> GraphState:
@@ -2114,7 +1866,7 @@ async def process_individual_files_node(state: GraphState) -> GraphState:
                         logging.error(f"[process_individual_files_node] Response Body: {e.body}")
                     
                     # Use the new error handling function
-                    error_msg = _handle_llm_error(e, None, f"process_individual_files_node_{filename}")
+                    error_msg = handle_llm_error(e, None, f"process_individual_files_node_{filename}")
                     
                     await update_progress()
                     return filename, error_msg
@@ -2431,7 +2183,7 @@ async def hierarchical_consolidation_node(state: GraphState) -> GraphState:
                 logging.error(f"[hierarchical_consolidation_node] Response Body: {e.body}")
             
             # Use the new error handling function
-            error_msg = _handle_llm_error(e, None, f"hierarchical_consolidation_node_batch_{batch_num + 1}")
+            error_msg = handle_llm_error(e, None, f"hierarchical_consolidation_node_batch_{batch_num + 1}")
             batch_results.append(error_msg)
     
     logging.info(f"[hierarchical_consolidation_node] Completed token-based hierarchical consolidation - {len(batch_results)} batch summaries created")

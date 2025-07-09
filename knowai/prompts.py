@@ -157,24 +157,6 @@ def get_hierarchical_consolidation_prompt_template() -> PromptTemplate:
         ]
     )
 
-
-# Error Messages
-CONTENT_POLICY_MESSAGE = (
-    "Due to content management policy issues with the AI provider, we are not able "
-    "to provide a response to this topic. Please rephrase your question and try again."
-)
-
-RATE_LIMIT_MESSAGE = (
-    "⚠️ Rate limit reached: The OpenAI LLM instance has reached its rate limit. "
-    "Please try your query again in 1 minute."
-)
-
-TOKEN_LIMIT_MESSAGE = (
-    "⚠️ Token limit exceeded: The prompt token limit has exceeded the maximum for the LLM instance. "
-    "Please contact the site administrator for assistance."
-)
-
-
 # Progress Messages for User Feedback
 PROGRESS_MESSAGES = {
     "initialization": {
