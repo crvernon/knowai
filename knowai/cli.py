@@ -7,12 +7,14 @@ import asyncio
 import os
 import uuid
 from importlib.metadata import version as _pkg_version, PackageNotFoundError
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, AsyncGenerator
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .core import KnowAIAgent
+from .core import KnowAIAgent, get_workflow_mermaid_diagram
+from .errors import RateLimitError, TokenLimitError
 
 
 try:
@@ -35,15 +37,14 @@ class InitPayload(BaseModel):
     Attributes:
         vectorstore_s3_uri (str): URI of the vectorstore, either an S3 URI
             (e.g., "s3://bucket/path") or a local filesystem path.
-        combine_threshold (Optional[int]): Threshold for combining
-            intermediate results. Defaults to None for the agent’s default.
         max_conversation_turns (Optional[int]): Maximum number of past
-            conversation turns to retain. Defaults to None for the agent’s
+            conversation turns to retain. Defaults to None for the agent's
             default.
+
     """
     vectorstore_s3_uri: str
-    combine_threshold: Optional[int] = None
     max_conversation_turns: Optional[int] = None
+
 
 
 class AskPayload(BaseModel):
@@ -52,11 +53,9 @@ class AskPayload(BaseModel):
 
     Attributes:
         session_id (str): Unique identifier for the conversation session.
-        question (str): The user’s current question to process.
+        question (str): The user's current question to process.
         selected_files (Optional[List[str]]): List of file paths to include in
             retrieval. Defaults to None.
-        bypass_individual_gen (bool): Whether to skip individual file-level
-            generation. Defaults to False.
         n_alternatives_override (Optional[int]): Override for the number of
             answer alternatives. Defaults to None.
         k_per_query_override (Optional[int]): Override for the number of chunks
@@ -65,7 +64,27 @@ class AskPayload(BaseModel):
     session_id: str
     question: str
     selected_files: Optional[List[str]] = None
-    bypass_individual_gen: bool = False
+    n_alternatives_override: Optional[int] = None
+    k_per_query_override: Optional[int] = None
+
+
+class AskStreamPayload(BaseModel):
+    """
+    Payload for a streaming conversational turn with the KnowAIAgent.
+
+    Attributes:
+        session_id (str): Unique identifier for the conversation session.
+        question (str): The user's current question to process.
+        selected_files (Optional[List[str]]): List of file paths to include in
+            retrieval. Defaults to None.
+        n_alternatives_override (Optional[int]): Override for the number of
+            answer alternatives. Defaults to None.
+        k_per_query_override (Optional[int]): Override for the number of chunks
+            retrieved per query. Defaults to None.
+    """
+    session_id: str
+    question: str
+    selected_files: Optional[List[str]] = None
     n_alternatives_override: Optional[int] = None
     k_per_query_override: Optional[int] = None
 
@@ -110,8 +129,7 @@ async def initialize(payload: InitPayload):
 
     Args:
         payload (InitPayload): Initialization parameters, including the
-            vectorstore URI (S3 or local), combine threshold, and maximum
-            conversation turns.
+            vectorstore URI (S3 or local) and maximum conversation turns.
 
     Returns:
         dict: A JSON-serializable dict containing:
@@ -125,8 +143,8 @@ async def initialize(payload: InitPayload):
         vec_path = uri
     agent = KnowAIAgent(
         vectorstore_path=vec_path,
-        combine_threshold=payload.combine_threshold or 50,
         max_conversation_turns=payload.max_conversation_turns or 20,
+
     )
     session_id = str(uuid.uuid4())
     _sessions[session_id] = agent
@@ -143,8 +161,8 @@ async def ask(payload: AskPayload):
             optional parameters for file selection and overrides.
 
     Returns:
-        dict: JSON-serializable result from the agent, including generation,
-            individual answers, and retrieved documents.
+        dict: JSON-serializable result from the agent, including generation
+            and retrieved documents.
     """
     agent = _sessions.get(payload.session_id)
     if not agent:
@@ -153,20 +171,110 @@ async def ask(payload: AskPayload):
     result = await agent.process_turn(
         user_question=payload.question,
         selected_files=payload.selected_files,
-        bypass_individual_gen=payload.bypass_individual_gen,
         n_alternatives_override=payload.n_alternatives_override,
         k_per_query_override=payload.k_per_query_override,
     )
     return result
 
 
-# --------------------------------------------------------------------------- #
-# Main (only executed when container starts)
-# --------------------------------------------------------------------------- #
+@app.post("/ask-stream")
+async def ask_stream(payload: AskStreamPayload):
+    """
+    Process a conversational turn with streaming response.
+
+    This endpoint streams the LLM response in real-time as it's being generated,
+    providing a more responsive user experience.
+
+    Args:
+        payload (AskStreamPayload): Payload containing session ID, question, and
+            optional parameters for file selection and overrides.
+
+    Returns:
+        StreamingResponse: Server-sent events stream containing the generated response.
+    """
+    agent = _sessions.get(payload.session_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Unknown session_id")
+
+    # Create a queue to collect tokens from the streaming callback
+    token_queue = asyncio.Queue()
+
+    def stream_callback(token: str):
+        """Callback to queue tokens for streaming."""
+        token_queue.put_nowait(token)
+
+    async def generate_stream() -> AsyncGenerator[str, None]:
+        """Generate streaming response."""
+        # Start the processing in the background
+        processing_task = asyncio.create_task(
+            agent.process_turn(
+                user_question=payload.question,
+                selected_files=payload.selected_files,
+                n_alternatives_override=payload.n_alternatives_override,
+                k_per_query_override=payload.k_per_query_override,
+                streaming_callback=stream_callback
+            )
+        )
+
+        # Stream tokens as they arrive
+        while True:
+            try:
+                # Wait for next token with timeout
+                token = await asyncio.wait_for(token_queue.get(), timeout=30.0)
+                yield f"data: {token}\n\n"
+            except asyncio.TimeoutError:
+                # Check if processing is complete
+                if processing_task.done():
+                    break
+                else:
+                    # Send keepalive
+                    yield "data: \n\n"
+
+        # Wait for processing to complete and handle exceptions
+        try:
+            await processing_task
+        except RateLimitError as e:
+            # Rate limit error - send error message and end stream
+            yield f"data: {str(e)}\n\n"
+        except TokenLimitError as e:
+            # Token limit error - send error message and end stream
+            yield f"data: {str(e)}\n\n"
+
+        # Send end marker
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        generate_stream(),
+        media_type="text/plain",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Content-Type": "text/event-stream",
+        }
+    )
+
+
+@app.get("/workflow-diagram")
+async def get_workflow_diagram():
+    """
+    Get a Mermaid diagram representation of the KnowAI workflow.
+
+    Returns:
+        dict: A JSON-serializable dict containing:
+            mermaid_diagram (str): Mermaid diagram string.
+    """
+    diagram = get_workflow_mermaid_diagram()
+    return {"mermaid_diagram": diagram}
+
+
 def _main():
+    """Entry point for the CLI application."""
     import uvicorn
 
-    uvicorn.run("knowai.cli:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")), log_level="info")
+    port = int(os.getenv("PORT", "8000"))
+    host = os.getenv("HOST", "0.0.0.0")
+
+    uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":
