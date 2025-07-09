@@ -7,10 +7,14 @@ from dotenv import load_dotenv
 
 from .agent import (
     GraphState,
-    create_graph_app,
-    RateLimitError,
-    TokenLimitError,
+    create_graph_app
 )
+
+from .errors import (
+    RateLimitError,
+    TokenLimitError
+)
+
 from knowai.agent import GLOBAL_PROGRESS_CB
 
 K_CHUNKS_RETRIEVER_DEFAULT = 15

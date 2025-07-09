@@ -59,7 +59,7 @@ MAX_COMPLETION_TOKENS = 32768  # Maximum tokens for completion
 MAX_CONCURRENT_LLM_CALLS = 10  # Limit concurrent LLM calls to 10
 MAX_FILES_FOR_HIERARCHICAL_CONSOLIDATION = 10  # Maximum number of files before using hierarchical consolidation
 HIERARCHICAL_CONSOLIDATION_BATCH_SIZE = 10  # Batch size for hierarchical consolidation
-MAX_TOKENS_PER_HIERARCHICAL_BATCH = 100_000  # Maximum tokens per hierarchical consolidation batch
+MAX_TOKENS_PER_HIERARCHICAL_BATCH = 50_000  # Maximum tokens per hierarchical consolidation batch
 
 # Limit for per-file responses to avoid huge, slow outputs
 INDIVIDUAL_FILE_MAX_TOKENS = 4096  # tokens (≈ four-times characters)
@@ -913,7 +913,8 @@ async def generate_multi_queries_node(state: GraphState) -> GraphState:
         logging.info("[generate_multi_queries_node] Generating alternative queries...")
 
         mqr_llm_chain = MultiQueryRetriever.from_llm(
-            retriever=base_retriever, llm=llm_small
+            retriever=base_retriever, 
+            llm=llm_small
         ).llm_chain
 
         llm_response = await mqr_llm_chain.ainvoke({"question": question})
@@ -1233,7 +1234,8 @@ async def process_batches_node(state: GraphState) -> GraphState:
         
         # Process each batch
         detailed_flag = state.get("detailed_response_desired", True)
-        llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
+        # llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
+        llm_instance = state.get("llm_large")
         combo_prompt = get_synthesis_prompt_template()
         streaming_callback = state.get("streaming_callback")
         
@@ -1530,7 +1532,8 @@ async def combine_answers_node(state: GraphState) -> GraphState:
                 _update_progress_callback(state, "combine_answers_node", "combining_hierarchical_results")
                 
                 detailed_flag = state.get("detailed_response_desired", True)
-                llm_instance = state.get("llm_small") or state.get("llm_large")
+                # llm_instance = state.get("llm_small") or state.get("llm_large")
+                llm_instance = state.get("llm_large")
                 streaming_callback = None
                 
                 # Get batch combination prompt for combining hierarchical results
@@ -1565,7 +1568,8 @@ async def combine_answers_node(state: GraphState) -> GraphState:
                 _update_progress_callback(state, "combine_answers_node", "consolidating_individual_responses")
                 
                 detailed_flag = state.get("detailed_response_desired", True)
-                llm_instance = state.get("llm_small") or state.get("llm_large")
+                # llm_instance = state.get("llm_small") or state.get("llm_large")
+                llm_instance = state.get("llm_large")
                 streaming_callback = None
                 
                 # Get consolidation prompt for individual file responses
@@ -1600,7 +1604,9 @@ async def combine_answers_node(state: GraphState) -> GraphState:
             _update_progress_callback(state, "combine_answers_node", "combining_batch_results")
             
             detailed_flag = state.get("detailed_response_desired", True)
-            llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
+            # llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
+            llm_instance = state.get("llm_large")
+
             streaming_callback = None
             
             # Get batch combination prompt for combining batch results
@@ -1635,7 +1641,8 @@ async def combine_answers_node(state: GraphState) -> GraphState:
             _update_progress_callback(state, "combine_answers_node", "traditional_synthesis")
             
             detailed_flag = state.get("detailed_response_desired", True)
-            llm_instance = state.get("llm_small") or state.get("llm_large")
+            # llm_instance = state.get("llm_small") or state.get("llm_large")
+            llm_instance = state.get("llm_large")
             combo_prompt = get_synthesis_prompt_template()
             streaming_callback = None
 
@@ -1742,7 +1749,8 @@ async def process_individual_files_node(state: GraphState) -> GraphState:
     documents_by_file = state.get("documents_by_file", {})
     conversation_history = state.get("conversation_history")
     detailed_flag = state.get("detailed_response_desired", True)
-    llm_instance = state.get("llm_small") or state.get("llm_large")
+    # llm_instance = state.get("llm_small") or state.get("llm_large")
+    llm_instance = state.get("llm_large")
     
     if not question or not allowed_files or not documents_by_file:
         logging.info("[process_individual_files_node] Missing required data. Skipping individual processing.")
@@ -2064,7 +2072,8 @@ async def hierarchical_consolidation_node(state: GraphState) -> GraphState:
     logging.info(f"[hierarchical_consolidation_node] Starting token-based hierarchical consolidation for {len(allowed_files)} files")
     
     detailed_flag = state.get("detailed_response_desired", True)
-    llm_instance = state.get("llm_small") or state.get("llm_large")
+    # llm_instance = state.get("llm_small") or state.get("llm_large")
+    llm_instance = state.get("llm_large")
     streaming_callback = None
     conversation_history_str = _format_conversation_history(conversation_history)
     
