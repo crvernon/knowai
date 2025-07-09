@@ -450,7 +450,7 @@ def _update_progress_callback(
                 message = f"Completed processing {completed} files successfully"
             else:
                 # Individual file processing - in progress
-                message = f"Processing {completed} of {total} files..."
+                message = f"Processed {completed} of {total} files..."
         else:
             message = base_message
         

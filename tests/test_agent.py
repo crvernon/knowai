@@ -130,6 +130,7 @@ def base_state(tmp_path: Path) -> Dict[str, Any]:
         "conversation_history": [],
         "raw_documents_for_synthesis": None,
         "k_chunks_retriever": 3,
+        "k_chunks_retriever_all_docs": 10,
     }
 
 

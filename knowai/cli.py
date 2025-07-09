@@ -14,7 +14,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .core import KnowAIAgent, get_workflow_mermaid_diagram
-from .agent import RateLimitError, TokenLimitError
+from .errors import RateLimitError, TokenLimitError
 
 
 try:

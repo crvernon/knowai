@@ -39,6 +39,7 @@ class _DummyGraphApp:
             "generation": f"Echo: {state.get('question')}",
             "documents_by_file": {"file1": []},
             "raw_documents_for_synthesis": "dummy raw text",
+            "detailed_responses_for_ui": None,
         }
 
     def get_graph(self) -> _DummyGraph:  # noqa: D401
@@ -119,6 +120,7 @@ async def test_process_turn_updates_state(agent: "knowai.core.KnowAIAgent") -> N
         "generation",
         "documents_by_file",
         "raw_documents_for_synthesis",
+        "detailed_responses",
     }
     assert expected_keys == set(result.keys())
 

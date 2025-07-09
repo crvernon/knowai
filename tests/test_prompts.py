@@ -5,10 +5,10 @@ Tests for the centralized prompts module.
 import pytest
 from knowai.prompts import (
     get_synthesis_prompt_template,
-    CONTENT_POLICY_MESSAGE,
     get_progress_message,
     PROGRESS_MESSAGES
 )
+from knowai.errors import CONTENT_POLICY_MESSAGE
 
 
 def test_synthesis_prompt_template():
@@ -59,7 +59,7 @@ def test_get_progress_message():
     """Test the get_progress_message function."""
     # Test known node mappings
     assert "Setting up AI models" in get_progress_message("initialization", "instantiate_embeddings_node")
-    assert "Generating search queries" in get_progress_message("query_generation", "generate_multi_queries_node")
+    assert "Generating search query alternatives" in get_progress_message("query_generation", "generate_multi_queries_node")
     assert "Searching documents" in get_progress_message("document_retrieval", "extract_documents_node")
     assert "Preparing documents" in get_progress_message("document_preparation", "format_raw_documents_for_synthesis_node")
     assert "Synthesizing final response" in get_progress_message("synthesis", "combine_answers_node")
