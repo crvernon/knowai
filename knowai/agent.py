@@ -18,20 +18,14 @@ from langchain_core.language_models import BaseLanguageModel
 from langchain_core.vectorstores import VectorStoreRetriever
 from langchain_core.embeddings import Embeddings as LangchainEmbeddings
 from langchain_core.prompts import PromptTemplate
-
 from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph as Graph
+import tiktoken
 
-from .utils import is_content_policy_error
-
-# Try to import tiktoken for accurate token counting
-try:
-    import tiktoken
-    TIKTOKEN_AVAILABLE = True
-except ImportError:
-    TIKTOKEN_AVAILABLE = False
-    logging.warning("tiktoken not available. Using heuristic token estimation.")
+from .utils import (
+    is_content_policy_error
+)
 
 from .prompts import (
     get_synthesis_prompt_template,
@@ -44,9 +38,10 @@ from .prompts import (
     get_progress_message
 )
 
-# Add at the top of the file
+# global progress callback
 GLOBAL_PROGRESS_CB = None
 
+# instantiate logger
 logger = logging.getLogger(__name__)
 
 
@@ -68,7 +63,7 @@ MAX_COMPLETION_TOKENS = 32768  # Maximum tokens for completion
 MAX_CONCURRENT_LLM_CALLS = 10  # Limit concurrent LLM calls to 10
 MAX_FILES_FOR_HIERARCHICAL_CONSOLIDATION = 10  # Maximum number of files before using hierarchical consolidation
 HIERARCHICAL_CONSOLIDATION_BATCH_SIZE = 10  # Batch size for hierarchical consolidation
-MAX_TOKENS_PER_HIERARCHICAL_BATCH = 50_000  # Maximum tokens per hierarchical consolidation batch
+MAX_TOKENS_PER_HIERARCHICAL_BATCH = 100_000  # Maximum tokens per hierarchical consolidation batch
 
 # Limit for per-file responses to avoid huge, slow outputs
 INDIVIDUAL_FILE_MAX_TOKENS = 4096  # tokens (≈ four-times characters)
@@ -83,14 +78,12 @@ def get_tokenizer(encoding: str = "cl100k_base"):
     Optional[tiktoken.Encoding]
         tiktoken tokenizer if available, None otherwise.
     """
-    if TIKTOKEN_AVAILABLE:
-        try:
-            # Use cl100k_base encoding which is used by GPT-4
-            return tiktoken.get_encoding(encoding)
-        except Exception as e:
-            logging.warning(f"Failed to initialize tiktoken: {e}.")
-            return None
-    return None
+    try:
+        # Use cl100k_base encoding which is used by GPT-4
+        return tiktoken.get_encoding(encoding)
+    except Exception as e:
+        logging.warning(f"Failed to initialize tiktoken: {e}.")
+        return None
 
 
 def estimate_tokens(text: str) -> int:
@@ -110,14 +103,13 @@ def estimate_tokens(text: str) -> int:
     if not text:
         return 0
     
-    if TIKTOKEN_AVAILABLE:
-        try:
-            tokenizer = get_tokenizer()
-            if tokenizer:
-                return len(tokenizer.encode(text))
-        except Exception as e:
-            logging.warning(f"tiktoken failed: {e}.")
-    
+    try:
+        tokenizer = get_tokenizer()
+        if tokenizer:
+            return len(tokenizer.encode(text))
+    except Exception as e:
+        logging.warning(f"tiktoken failed: {e}.")
+
     # If tiktoken is not available or fails, raise an error
     raise RuntimeError("Accurate token counting requires tiktoken to be installed. Please install tiktoken: pip install tiktoken")
 
