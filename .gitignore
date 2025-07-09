@@ -1,3 +1,6 @@
+# ignore integration tests in scripts
+scripts/test_*.py
+
 # wildfire_knowai
 wildfire_knowai/
 
