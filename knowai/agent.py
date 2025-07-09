@@ -59,7 +59,7 @@ MAX_COMPLETION_TOKENS = 32768  # Maximum tokens for completion
 MAX_CONCURRENT_LLM_CALLS = 10  # Limit concurrent LLM calls to 10
 MAX_FILES_FOR_HIERARCHICAL_CONSOLIDATION = 10  # Maximum number of files before using hierarchical consolidation
 HIERARCHICAL_CONSOLIDATION_BATCH_SIZE = 10  # Batch size for hierarchical consolidation
-MAX_TOKENS_PER_HIERARCHICAL_BATCH = 50_000  # Maximum tokens per hierarchical consolidation batch
+MAX_TOKENS_PER_HIERARCHICAL_BATCH = 25_000  # Maximum tokens per hierarchical consolidation batch
 
 # Limit for per-file responses to avoid huge, slow outputs
 INDIVIDUAL_FILE_MAX_TOKENS = 4096  # tokens (≈ four-times characters)
@@ -566,7 +566,7 @@ def instantiate_llm_large(state: GraphState) -> GraphState:
             api_version = os.getenv("AZURE_OPENAI_API_4p1_VERSION")
 
             new_llm = AzureChatOpenAI(
-                temperature=0.2,
+                temperature=0.1,
                 api_version=api_version,
                 azure_deployment=deployment,
                 max_tokens=MAX_COMPLETION_TOKENS,
@@ -631,7 +631,7 @@ def instantiate_llm_small(state: GraphState) -> GraphState:
             api_version = os.getenv("AZURE_OPENAI_API_4p1_VERSION")
 
             new_llm = AzureChatOpenAI(
-                temperature=0.2,
+                temperature=0.1,
                 api_version=api_version,
                 azure_deployment=deployment,
                 max_tokens=MAX_COMPLETION_TOKENS,
@@ -1472,6 +1472,190 @@ async def _stream_final_generation(
         return handle_llm_error(e, streaming_callback, "_stream_final_generation")
 
 
+
+async def hierarchical_consolidation_node(state: GraphState) -> GraphState:
+    """
+    Consolidate individual file responses in token-based batches to ensure all information is preserved.
+    
+    This node processes individual file responses in hierarchical batches based on token count
+    rather than file count. Each batch is limited to MAX_TOKENS_PER_HIERARCHICAL_BATCH tokens
+    to ensure we stay within context window limits.
+    
+    For example, if there are 4 files with responses of 10k, 100k, 290k, and 150k tokens:
+    - Batch 1: Files 1, 2, 3 (400k tokens total)
+    - Batch 2: File 4 (150k tokens)
+    
+    This ensures that no information is lost when processing many documents, as each batch
+    summary preserves all important details from its constituent files while staying within
+    token limits.
+    
+    Parameters
+    ----------
+    state : GraphState
+        Current mutable graph state containing individual file responses.
+        
+    Returns
+    -------
+    GraphState
+        Updated state with hierarchical consolidation results.
+    """
+    start_time = _log_node_start("hierarchical_consolidation_node")
+    _update_progress_callback(state, "hierarchical_consolidation_node", "hierarchical_consolidation")
+    
+    question = state.get("question")
+    allowed_files = state.get("allowed_files")
+    individual_file_responses = state.get("individual_file_responses", {})
+    conversation_history = state.get("conversation_history")
+    process_files_individually = state.get("process_files_individually", False)
+    
+    # Only run if we're in individual file processing mode and have responses
+    if not process_files_individually or not individual_file_responses or not allowed_files:
+        logging.info("[hierarchical_consolidation_node] Skipping - not in individual file processing mode or no responses")
+        logging.info(f"[hierarchical_consolidation_node] process_files_individually: {process_files_individually}")
+        logging.info(f"[hierarchical_consolidation_node] individual_file_responses: {len(individual_file_responses) if individual_file_responses else 0}")
+        logging.info(f"[hierarchical_consolidation_node] allowed_files: {len(allowed_files) if allowed_files else 0}")
+        return {**state, "hierarchical_consolidation_results": None}
+    
+    # Check if we have enough files to warrant hierarchical consolidation (more than n)
+    logging.info(f"[hierarchical_consolidation_node] Checking file count: {len(allowed_files)} vs threshold: {MAX_FILES_FOR_HIERARCHICAL_CONSOLIDATION}")
+    if len(allowed_files) <= MAX_FILES_FOR_HIERARCHICAL_CONSOLIDATION:
+        logging.info(f"[hierarchical_consolidation_node] Only {len(allowed_files)} files - no hierarchical consolidation needed")
+        return {**state, "hierarchical_consolidation_results": None}
+    
+    logging.info(f"[hierarchical_consolidation_node] Starting token-based hierarchical consolidation for {len(allowed_files)} files")
+    
+    detailed_flag = state.get("detailed_response_desired", True)
+    # llm_instance = state.get("llm_small") or state.get("llm_large")
+    llm_instance = state.get("llm_large")
+    streaming_callback = None
+    conversation_history_str = _format_conversation_history(conversation_history)
+    
+    if not llm_instance:
+        logging.error("[hierarchical_consolidation_node] LLM instance not available")
+        return {**state, "hierarchical_consolidation_results": None}
+    
+    # Get the hierarchical consolidation prompt
+    hierarchical_prompt = get_hierarchical_consolidation_prompt_template()
+    
+    # Create token-based batches
+    batches = create_individual_file_response_batches(
+        individual_file_responses=individual_file_responses,
+        allowed_files=allowed_files,
+        max_tokens_per_batch=MAX_TOKENS_PER_HIERARCHICAL_BATCH,
+        question=question,
+        conversation_history=conversation_history_str
+    )
+    
+    total_batches = len(batches)
+    logging.info(f"[hierarchical_consolidation_node] Created {total_batches} token-based batches")
+    
+    # Log batch details for debugging
+    for i, (batch_files, batch_tokens) in enumerate(batches):
+        logging.info(f"[hierarchical_consolidation_node] Batch {i+1}: {len(batch_files)} files, {batch_tokens:,} tokens")
+        for filename in batch_files:
+            response_length = len(individual_file_responses.get(filename, ""))
+            logging.info(f"[hierarchical_consolidation_node]   - {filename}: {response_length:,} chars")
+    
+    # Process each batch
+    batch_results = []
+    
+    for batch_num, (batch_files, batch_tokens) in enumerate(batches):
+        logging.info(f"[hierarchical_consolidation_node] Processing batch {batch_num + 1}/{total_batches} ({batch_tokens:,} tokens, {len(batch_files)} files)")
+        # Update progress callback with batch information
+        if total_batches == 1:
+            stage = "hierarchical_consolidation"
+        elif total_batches == 2:
+            stage = f"processing_batch_{batch_num + 1}_2"
+        elif total_batches == 3:
+            stage = f"processing_batch_{batch_num + 1}_3"
+        else:
+            stage = "hierarchical_consolidation"
+        
+        _update_progress_callback(
+            state, 
+            "hierarchical_consolidation_node", 
+            stage,
+            {"completed": batch_num, "total": total_batches, "current_batch": batch_num + 1}
+        )
+        
+        # Format responses for this batch
+        batch_responses = []
+        for filename in batch_files:
+            if filename in individual_file_responses:
+                response = individual_file_responses[filename]
+                batch_responses.append(f"--- File: {filename} ---\n{response}")
+            else:
+                batch_responses.append(f"--- File: {filename} ---\nNo response generated for this file.")
+        
+        batch_content = "\n\n".join(batch_responses)
+        
+        # Generate consolidated summary for this batch
+        batch_start_time = time.perf_counter()
+        try:
+            logging.info(f"[hierarchical_consolidation_node] Starting LLM call for batch {batch_num + 1}")
+            batch_summary = await _stream_final_generation(
+                question=question,
+                content_llm=batch_content,
+                llm_instance=llm_instance,
+                combo_prompt=hierarchical_prompt,
+                conversation_history_str=conversation_history_str,
+                no_info_list=[],  # Already handled in individual processing
+                error_list=[],    # Already handled in individual processing
+                streaming_callback=streaming_callback,
+                additional_variables={"batch_number": batch_num + 1}
+            )
+            
+            batch_end_time = time.perf_counter()
+            batch_duration = batch_end_time - batch_start_time
+            # Check if response exceeds MAX_COMPLETION_TOKENS (rough estimate: 4 chars per token)
+            estimated_tokens = len(batch_summary) // 4
+            if estimated_tokens > MAX_COMPLETION_TOKENS:
+                logging.error(f"[hierarchical_consolidation_node] Batch {batch_num + 1} summary estimated at {estimated_tokens:,} tokens, exceeds MAX_COMPLETION_TOKENS ({MAX_COMPLETION_TOKENS:,})")
+                logging.error(f"[hierarchical_consolidation_node] Summary length: {len(batch_summary):,} characters")
+                
+                # Truncate to a reasonable length (roughly MAX_COMPLETION_TOKENS * 4 chars)
+                max_chars = MAX_COMPLETION_TOKENS * 4
+                batch_summary = batch_summary[:max_chars] + "\n\n[Summary truncated due to token limit]"
+                logging.warning(f"[hierarchical_consolidation_node] Truncated summary to {len(batch_summary):,} characters")
+            
+            # Additional safety check for extremely long responses
+            max_hierarchical_length = 100000  # characters (much higher than before)
+            if len(batch_summary) > max_hierarchical_length:
+                logging.error(f"[hierarchical_consolidation_node] Batch {batch_num + 1} summary was {len(batch_summary):,} chars, truncating to {max_hierarchical_length:,}")
+                batch_summary = batch_summary[:max_hierarchical_length] + "\n\n[Summary truncated due to length limits]"
+            
+            batch_results.append(batch_summary)
+            logging.info(f"[hierarchical_consolidation_node] Completed batch {batch_num + 1} ({len(batch_summary)} chars) in {batch_duration:.2f} seconds")
+            
+        except Exception as e:
+            logging.error(f"[hierarchical_consolidation_node] Error consolidating batch {batch_num + 1}: {e}")
+            logging.error(f"[hierarchical_consolidation_node] Error type: {type(e).__name__}")
+            logging.error(f"[hierarchical_consolidation_node] Error details: {e}")
+            
+            # Log additional context for debugging
+            if hasattr(e, 'response'):
+                logging.error(f"[hierarchical_consolidation_node] API Response: {e.response}")
+            if hasattr(e, 'status_code'):
+                logging.error(f"[hierarchical_consolidation_node] Status Code: {e.status_code}")
+            if hasattr(e, 'body'):
+                logging.error(f"[hierarchical_consolidation_node] Response Body: {e.body}")
+            
+            # Use the new error handling function
+            error_msg = handle_llm_error(e, None, f"hierarchical_consolidation_node_batch_{batch_num + 1}")
+            batch_results.append(error_msg)
+    
+    logging.info(f"[hierarchical_consolidation_node] Completed token-based hierarchical consolidation - {len(batch_results)} batch summaries created")
+    _update_progress_callback(
+        state, 
+        "hierarchical_consolidation_node", 
+        "hierarchical_consolidation",
+        {"completed": total_batches, "total": total_batches}
+    )
+    
+    _log_node_end("hierarchical_consolidation_node", start_time)
+    return {**state, "hierarchical_consolidation_results": batch_results}
+
+
 async def combine_answers_node(state: GraphState) -> GraphState:
     """
     Synthesize a final answer for the user by combining raw document text, batch results, or individual file responses.
@@ -2019,189 +2203,3 @@ def create_graph_app() -> Graph:
 
     return workflow.compile()
 
-
-async def hierarchical_consolidation_node(state: GraphState) -> GraphState:
-    """
-    Consolidate individual file responses in token-based batches to ensure all information is preserved.
-    
-    This node processes individual file responses in hierarchical batches based on token count
-    rather than file count. Each batch is limited to MAX_TOKENS_PER_HIERARCHICAL_BATCH tokens
-    to ensure we stay within context window limits.
-    
-    For example, if there are 4 files with responses of 10k, 100k, 290k, and 150k tokens:
-    - Batch 1: Files 1, 2, 3 (400k tokens total)
-    - Batch 2: File 4 (150k tokens)
-    
-    This ensures that no information is lost when processing many documents, as each batch
-    summary preserves all important details from its constituent files while staying within
-    token limits.
-    
-    Parameters
-    ----------
-    state : GraphState
-        Current mutable graph state containing individual file responses.
-        
-    Returns
-    -------
-    GraphState
-        Updated state with hierarchical consolidation results.
-    """
-    start_time = _log_node_start("hierarchical_consolidation_node")
-    _update_progress_callback(state, "hierarchical_consolidation_node", "hierarchical_consolidation")
-    
-    question = state.get("question")
-    allowed_files = state.get("allowed_files")
-    individual_file_responses = state.get("individual_file_responses", {})
-    conversation_history = state.get("conversation_history")
-    process_files_individually = state.get("process_files_individually", False)
-    
-    # Only run if we're in individual file processing mode and have responses
-    if not process_files_individually or not individual_file_responses or not allowed_files:
-        logging.info("[hierarchical_consolidation_node] Skipping - not in individual file processing mode or no responses")
-        logging.info(f"[hierarchical_consolidation_node] process_files_individually: {process_files_individually}")
-        logging.info(f"[hierarchical_consolidation_node] individual_file_responses: {len(individual_file_responses) if individual_file_responses else 0}")
-        logging.info(f"[hierarchical_consolidation_node] allowed_files: {len(allowed_files) if allowed_files else 0}")
-        return {**state, "hierarchical_consolidation_results": None}
-    
-    # Check if we have enough files to warrant hierarchical consolidation (more than n)
-    logging.info(f"[hierarchical_consolidation_node] Checking file count: {len(allowed_files)} vs threshold: {MAX_FILES_FOR_HIERARCHICAL_CONSOLIDATION}")
-    if len(allowed_files) <= MAX_FILES_FOR_HIERARCHICAL_CONSOLIDATION:
-        logging.info(f"[hierarchical_consolidation_node] Only {len(allowed_files)} files - no hierarchical consolidation needed")
-        return {**state, "hierarchical_consolidation_results": None}
-    
-    logging.info(f"[hierarchical_consolidation_node] Starting token-based hierarchical consolidation for {len(allowed_files)} files")
-    
-    detailed_flag = state.get("detailed_response_desired", True)
-    # llm_instance = state.get("llm_small") or state.get("llm_large")
-    llm_instance = state.get("llm_large")
-    streaming_callback = state.get("streaming_callback")
-    conversation_history_str = _format_conversation_history(conversation_history)
-    
-    if not llm_instance:
-        logging.error("[hierarchical_consolidation_node] LLM instance not available")
-        return {**state, "hierarchical_consolidation_results": None}
-    
-    # Get the hierarchical consolidation prompt
-    hierarchical_prompt = get_hierarchical_consolidation_prompt_template()
-    
-    # Create token-based batches
-    batches = create_individual_file_response_batches(
-        individual_file_responses=individual_file_responses,
-        allowed_files=allowed_files,
-        max_tokens_per_batch=MAX_TOKENS_PER_HIERARCHICAL_BATCH,
-        question=question,
-        conversation_history=conversation_history_str
-    )
-    
-    total_batches = len(batches)
-    logging.info(f"[hierarchical_consolidation_node] Created {total_batches} token-based batches")
-    
-    # Log batch details for debugging
-    for i, (batch_files, batch_tokens) in enumerate(batches):
-        logging.info(f"[hierarchical_consolidation_node] Batch {i+1}: {len(batch_files)} files, {batch_tokens:,} tokens")
-        for filename in batch_files:
-            response_length = len(individual_file_responses.get(filename, ""))
-            logging.info(f"[hierarchical_consolidation_node]   - {filename}: {response_length:,} chars")
-    
-    # Process each batch
-    batch_results = []
-    
-    for batch_num, (batch_files, batch_tokens) in enumerate(batches):
-        logging.info(f"[hierarchical_consolidation_node] Processing batch {batch_num + 1}/{total_batches} ({batch_tokens:,} tokens, {len(batch_files)} files)")
-        # Update progress callback with batch information
-        if total_batches == 1:
-            stage = "hierarchical_consolidation"
-        elif total_batches == 2:
-            stage = f"processing_batch_{batch_num + 1}_2"
-        elif total_batches == 3:
-            stage = f"processing_batch_{batch_num + 1}_3"
-        else:
-            stage = "hierarchical_consolidation"
-        
-        _update_progress_callback(
-            state, 
-            "hierarchical_consolidation_node", 
-            stage,
-            {"completed": batch_num, "total": total_batches, "current_batch": batch_num + 1}
-        )
-        
-        # Add a more descriptive progress message for the UI
-        if streaming_callback:
-            streaming_callback(f"\n\n--- Processing hierarchical consolidation batch {batch_num + 1} of {total_batches} ({len(batch_files)} files, {batch_tokens:,} tokens) ---\n\n")
-        
-        # Format responses for this batch
-        batch_responses = []
-        for filename in batch_files:
-            if filename in individual_file_responses:
-                response = individual_file_responses[filename]
-                batch_responses.append(f"--- File: {filename} ---\n{response}")
-            else:
-                batch_responses.append(f"--- File: {filename} ---\nNo response generated for this file.")
-        
-        batch_content = "\n\n".join(batch_responses)
-        
-        # Generate consolidated summary for this batch
-        batch_start_time = time.perf_counter()
-        try:
-            logging.info(f"[hierarchical_consolidation_node] Starting LLM call for batch {batch_num + 1}")
-            batch_summary = await _stream_final_generation(
-                question=question,
-                content_llm=batch_content,
-                llm_instance=llm_instance,
-                combo_prompt=hierarchical_prompt,
-                conversation_history_str=conversation_history_str,
-                no_info_list=[],  # Already handled in individual processing
-                error_list=[],    # Already handled in individual processing
-                streaming_callback=streaming_callback,
-                additional_variables={"batch_number": batch_num + 1}
-            )
-            
-            batch_end_time = time.perf_counter()
-            batch_duration = batch_end_time - batch_start_time
-            # Check if response exceeds MAX_COMPLETION_TOKENS (rough estimate: 4 chars per token)
-            estimated_tokens = len(batch_summary) // 4
-            if estimated_tokens > MAX_COMPLETION_TOKENS:
-                logging.error(f"[hierarchical_consolidation_node] Batch {batch_num + 1} summary estimated at {estimated_tokens:,} tokens, exceeds MAX_COMPLETION_TOKENS ({MAX_COMPLETION_TOKENS:,})")
-                logging.error(f"[hierarchical_consolidation_node] Summary length: {len(batch_summary):,} characters")
-                
-                # Truncate to a reasonable length (roughly MAX_COMPLETION_TOKENS * 4 chars)
-                max_chars = MAX_COMPLETION_TOKENS * 4
-                batch_summary = batch_summary[:max_chars] + "\n\n[Summary truncated due to token limit]"
-                logging.warning(f"[hierarchical_consolidation_node] Truncated summary to {len(batch_summary):,} characters")
-            
-            # Additional safety check for extremely long responses
-            max_hierarchical_length = 100000  # characters (much higher than before)
-            if len(batch_summary) > max_hierarchical_length:
-                logging.error(f"[hierarchical_consolidation_node] Batch {batch_num + 1} summary was {len(batch_summary):,} chars, truncating to {max_hierarchical_length:,}")
-                batch_summary = batch_summary[:max_hierarchical_length] + "\n\n[Summary truncated due to length limits]"
-            
-            batch_results.append(batch_summary)
-            logging.info(f"[hierarchical_consolidation_node] Completed batch {batch_num + 1} ({len(batch_summary)} chars) in {batch_duration:.2f} seconds")
-            
-        except Exception as e:
-            logging.error(f"[hierarchical_consolidation_node] Error consolidating batch {batch_num + 1}: {e}")
-            logging.error(f"[hierarchical_consolidation_node] Error type: {type(e).__name__}")
-            logging.error(f"[hierarchical_consolidation_node] Error details: {e}")
-            
-            # Log additional context for debugging
-            if hasattr(e, 'response'):
-                logging.error(f"[hierarchical_consolidation_node] API Response: {e.response}")
-            if hasattr(e, 'status_code'):
-                logging.error(f"[hierarchical_consolidation_node] Status Code: {e.status_code}")
-            if hasattr(e, 'body'):
-                logging.error(f"[hierarchical_consolidation_node] Response Body: {e.body}")
-            
-            # Use the new error handling function
-            error_msg = handle_llm_error(e, None, f"hierarchical_consolidation_node_batch_{batch_num + 1}")
-            batch_results.append(error_msg)
-    
-    logging.info(f"[hierarchical_consolidation_node] Completed token-based hierarchical consolidation - {len(batch_results)} batch summaries created")
-    _update_progress_callback(
-        state, 
-        "hierarchical_consolidation_node", 
-        "hierarchical_consolidation",
-        {"completed": total_batches, "total": total_batches}
-    )
-    
-    _log_node_end("hierarchical_consolidation_node", start_time)
-    return {**state, "hierarchical_consolidation_results": batch_results}
