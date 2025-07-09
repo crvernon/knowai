@@ -100,7 +100,7 @@ agent = KnowAIAgent(vectorstore_path=VSTORE_PATH)
 # Explicit accurate token counting
 agent = KnowAIAgent(
     vectorstore_path=VSTORE_PATH,
-    use_accurate_token_counting=True
+    
 )
 ```
 
@@ -113,7 +113,7 @@ agent = KnowAIAgent(
 # Use heuristic token counting
 agent = KnowAIAgent(
     vectorstore_path=VSTORE_PATH,
-    use_accurate_token_counting=False
+    
 )
 ```
 
@@ -123,7 +123,7 @@ curl -X POST http://127.0.0.1:8000/initialize \
   -H "Content-Type: application/json" \
   -d '{
     "vectorstore_s3_uri": "/path/to/vectorstore",
-    "use_accurate_token_counting": true
+    
   }'
 ```
 

@@ -58,7 +58,7 @@ async def test_concurrency_limit(vectorstore_path: str):
     
     try:
         print("🔄 Starting processing with concurrency control...")
-        print("   (Watch the logs to see how files are processed in batches of 10)")
+        print("   (Watch the logs to see how files are processed with concurrency control)")
         print()
         
         result = await agent.process_turn(

@@ -76,7 +76,7 @@ async def test_citation_in_workflow():
         agent = KnowAIAgent(
             vectorstore_path=temp_dir,
             process_files_individually=True,
-            use_accurate_token_counting=False
+    
         )
         
         # Create test individual file responses with citations

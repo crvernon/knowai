@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .core import KnowAIAgent, get_workflow_mermaid_diagram
+from .agent import RateLimitError, TokenLimitError
 
 
 try:
@@ -39,12 +40,11 @@ class InitPayload(BaseModel):
         max_conversation_turns (Optional[int]): Maximum number of past
             conversation turns to retain. Defaults to None for the agent's
             default.
-        use_accurate_token_counting (Optional[bool]): Whether to use tiktoken
-            for accurate token counting when available. Defaults to True.
+
     """
     vectorstore_s3_uri: str
     max_conversation_turns: Optional[int] = None
-    use_accurate_token_counting: Optional[bool] = True
+
 
 
 class AskPayload(BaseModel):
@@ -144,7 +144,7 @@ async def initialize(payload: InitPayload):
     agent = KnowAIAgent(
         vectorstore_path=vec_path,
         max_conversation_turns=payload.max_conversation_turns or 20,
-        use_accurate_token_counting=payload.use_accurate_token_counting,
+
     )
     session_id = str(uuid.uuid4())
     _sessions[session_id] = agent
@@ -230,8 +230,15 @@ async def ask_stream(payload: AskStreamPayload):
                     # Send keepalive
                     yield "data: \n\n"
 
-        # Wait for processing to complete
-        await processing_task
+        # Wait for processing to complete and handle exceptions
+        try:
+            await processing_task
+        except RateLimitError as e:
+            # Rate limit error - send error message and end stream
+            yield f"data: {str(e)}\n\n"
+        except TokenLimitError as e:
+            # Token limit error - send error message and end stream
+            yield f"data: {str(e)}\n\n"
 
         # Send end marker
         yield "data: [DONE]\n\n"

@@ -60,7 +60,7 @@ BATCH_COMBINATION_PROMPT = (
 )
 
 
-# Hierarchical Consolidation Prompt for Individual File Responses (Batches of 10)
+# Hierarchical Consolidation Prompt for Individual File Responses (Token-based Batches)
 HIERARCHICAL_CONSOLIDATION_PROMPT = (
     "You are an expert AI assistant. Consolidate the following individual file responses "
     "into a comprehensive summary that preserves ALL important information from each file.\n\n"
@@ -71,7 +71,8 @@ HIERARCHICAL_CONSOLIDATION_PROMPT = (
     "comprehensive summary that includes ALL important information from each individual file response. "
     "DO NOT omit any cited information, key findings, or important details. "
     "ALWAYS include specific citations when referencing information from files. "
-    "Use the format: (filename.pdf, Page X) or (filename.pdf) when citing content. "
+    "Use the format: (filename.pdf, Page X) when citing content. "
+    "Skip introductory formalities and focus on a bulleted list of information. "
     "Structure the response logically while ensuring every file's contribution is clearly represented. "
     "If a file had no relevant information, acknowledge this explicitly.\n\n"
     "Consolidated Summary for Batch {batch_number}:"
@@ -139,7 +140,7 @@ def get_batch_combination_prompt_template() -> PromptTemplate:
 
 def get_hierarchical_consolidation_prompt_template() -> PromptTemplate:
     """
-    Get the hierarchical consolidation prompt template for individual file responses in batches of 10.
+    Get the hierarchical consolidation prompt template for individual file responses in token-based batches.
     
     Returns
     -------
@@ -157,10 +158,20 @@ def get_hierarchical_consolidation_prompt_template() -> PromptTemplate:
     )
 
 
-# Content Policy Error Message
+# Error Messages
 CONTENT_POLICY_MESSAGE = (
     "Due to content management policy issues with the AI provider, we are not able "
     "to provide a response to this topic. Please rephrase your question and try again."
+)
+
+RATE_LIMIT_MESSAGE = (
+    "⚠️ Rate limit reached: The OpenAI LLM instance has reached its rate limit. "
+    "Please try your query again in 1 minute."
+)
+
+TOKEN_LIMIT_MESSAGE = (
+    "⚠️ Token limit exceeded: The prompt token limit has exceeded the maximum for the LLM instance. "
+    "Please contact the site administrator for assistance."
 )
 
 
@@ -174,7 +185,7 @@ PROGRESS_MESSAGES = {
         "retriever": "Setting up document search engine..."
     },
     "query_generation": {
-        "multi_queries": "Generating search queries..."
+        "multi_queries": "Generating search query alternatives..."
     },
     "document_retrieval": {
         "extraction": "Searching documents for relevant information..."
@@ -218,6 +229,14 @@ PROGRESS_MESSAGES = {
     "consolidating_individual_responses": {
         "consolidating": "Consolidating individual file responses..."
     },
+    "hierarchical_consolidation": {
+        "hierarchical_consolidation": "Consolidating file responses in token-based batches...",
+        "processing_batch_1_2": "Processing hierarchical consolidation batch 1 of 2...",
+        "processing_batch_2_2": "Processing hierarchical consolidation batch 2 of 2...",
+        "processing_batch_1_3": "Processing hierarchical consolidation batch 1 of 3...",
+        "processing_batch_2_3": "Processing hierarchical consolidation batch 2 of 3...",
+        "processing_batch_3_3": "Processing hierarchical consolidation batch 3 of 3..."
+    },
     "combining_batch_results": {
         "combining": "Combining batch results..."
     },
@@ -257,6 +276,7 @@ def get_progress_message(stage: str, node: str) -> str:
         "format_raw_documents_for_synthesis_node": "format_raw",
         "process_batches_node": "process_batches",
         "process_individual_files_node": "process_individual_files",
+        "hierarchical_consolidation_node": "hierarchical_consolidation",
         "combine_answers_node": "combine_answers"
     }
     
