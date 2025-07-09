@@ -231,7 +231,8 @@ class KnowAIAgent:
         progress_cb: Optional[Callable[[str, str, Dict[str, Any]], None]] = None,
         detailed_response_desired: Optional[bool] = None,
         streaming_callback: Optional[Callable[[str], None]] = None,
-        process_files_individually: Optional[bool] = None
+        process_files_individually: Optional[bool] = None,
+        show_detailed_individual_responses: Optional[bool] = None
     ) -> Dict[str, Any]:
         """
         Processes a single conversational turn.
@@ -258,6 +259,10 @@ class KnowAIAgent:
             When True, each file is processed separately by the LLM and then
             all responses are combined into a final answer. When False, uses
             traditional batch processing approach.
+        show_detailed_individual_responses : Optional[bool]
+            Whether to include individual document responses in the final output.
+            When True, the response will include a section with detailed responses
+            from each individual document after the main summary.
 
         Returns:
             A dictionary containing:
@@ -284,6 +289,9 @@ class KnowAIAgent:
 
         if process_files_individually is not None:
             self.session_state["process_files_individually"] = process_files_individually
+
+        if show_detailed_individual_responses is not None:
+            self.session_state["show_detailed_individual_responses"] = show_detailed_individual_responses
 
         # Ensure all required GraphState keys are present
         for key in GraphState.__annotations__.keys():

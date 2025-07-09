@@ -23,6 +23,8 @@ from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import StateGraph, END
 from langgraph.graph.state import CompiledStateGraph as Graph
 
+from .utils import is_content_policy_error
+
 # Try to import tiktoken for accurate token counting
 try:
     import tiktoken
@@ -370,33 +372,6 @@ class GraphState(TypedDict):
     show_detailed_individual_responses: bool
     detailed_responses_for_ui: Optional[str]
     rate_limit_error_occurred: bool
-
-
-def _is_content_policy_error(e: Exception) -> bool:
-    """
-    Determine whether an exception message indicates an AI content‑policy
-    violation.
-
-    Parameters
-    ----------
-    e : Exception
-        Exception raised by the LLM provider.
-
-    Returns
-    -------
-    bool
-        ``True`` if the exception message contains any keyword that signals
-        a policy‑related block; otherwise ``False``.
-    """
-    error_message = str(e).lower()
-    keywords = [
-        "content filter",
-        "content management policy",
-        "responsible ai",
-        "safety policy",
-        "prompt blocked"  # Common for Azure
-    ]
-    return any(keyword in error_message for keyword in keywords)
 
 
 def _log_node_start(node_name: str) -> float:
@@ -996,7 +971,7 @@ async def generate_multi_queries_node(state: GraphState) -> GraphState:
         )
 
     except Exception as e_query_gen:
-        if _is_content_policy_error(e_query_gen):
+        if is_content_policy_error(e_query_gen):
             logging.warning(
                 "[generate_multi_queries_node] Content policy violation during "
                 f"query generation. Using original question only. Error: {e_query_gen}"
