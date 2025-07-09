@@ -39,6 +39,8 @@ from .prompts import (
     get_batch_combination_prompt_template,
     get_hierarchical_consolidation_prompt_template,
     CONTENT_POLICY_MESSAGE,
+    RATE_LIMIT_MESSAGE,
+    TOKEN_LIMIT_MESSAGE,
     get_progress_message
 )
 
@@ -48,46 +50,57 @@ GLOBAL_PROGRESS_CB = None
 logger = logging.getLogger(__name__)
 
 
+class RateLimitError(Exception):
+    """Custom exception for rate limit errors."""
+    pass
+
+
+class TokenLimitError(Exception):
+    """Custom exception for token limit errors."""
+    pass
+
+
 # Token management constants
 GPT4_1_CONTEXT_WINDOW = 1_000_000  # GPT-4.1 context window
 TOKEN_SAFETY_MARGIN = 0.1  # 10% safety margin
-DEFAULT_TOKENS_PER_CHAR = 0.25  # Rough estimate: 4 chars per token
-SYSTEM_PROMPT_TOKENS = 2000  # Estimated tokens for system prompt
 CONVERSATION_HISTORY_BUFFER = 5000  # Buffer for conversation history
-USE_ACCURATE_TOKEN_COUNTING = True  # Default to using tiktoken when available
 MAX_COMPLETION_TOKENS = 32768  # Maximum tokens for completion
 MAX_CONCURRENT_LLM_CALLS = 10  # Limit concurrent LLM calls to 10
+MAX_FILES_FOR_HIERARCHICAL_CONSOLIDATION = 10  # Maximum number of files before using hierarchical consolidation
+HIERARCHICAL_CONSOLIDATION_BATCH_SIZE = 10  # Batch size for hierarchical consolidation
+MAX_TOKENS_PER_HIERARCHICAL_BATCH = 50_000  # Maximum tokens per hierarchical consolidation batch
+
+# Limit for per-file responses to avoid huge, slow outputs
+INDIVIDUAL_FILE_MAX_TOKENS = 4096  # tokens (≈ four-times characters)
 
 
 def get_tokenizer(encoding: str = "cl100k_base"):
     """
-    Get the appropriate tokenizer based on availability and configuration.
+    Get the tiktoken tokenizer for accurate token counting.
     
     Returns
     -------
     Optional[tiktoken.Encoding]
-        tiktoken tokenizer if available and enabled, None otherwise.
+        tiktoken tokenizer if available, None otherwise.
     """
-    if USE_ACCURATE_TOKEN_COUNTING and TIKTOKEN_AVAILABLE:
+    if TIKTOKEN_AVAILABLE:
         try:
             # Use cl100k_base encoding which is used by GPT-4
             return tiktoken.get_encoding(encoding)
         except Exception as e:
-            logging.warning(f"Failed to initialize tiktoken: {e}. Falling back to heuristic estimation.")
+            logging.warning(f"Failed to initialize tiktoken: {e}.")
             return None
     return None
 
 
-def estimate_tokens(text: str, use_accurate: bool = USE_ACCURATE_TOKEN_COUNTING) -> int:
+def estimate_tokens(text: str) -> int:
     """
-    Estimate the number of tokens in a text string.
+    Estimate the number of tokens in a text string using tiktoken.
     
     Parameters
     ----------
     text : str
         The text to estimate tokens for.
-    use_accurate : bool
-        Whether to use tiktoken for accurate counting (if available).
         
     Returns
     -------
@@ -97,17 +110,16 @@ def estimate_tokens(text: str, use_accurate: bool = USE_ACCURATE_TOKEN_COUNTING)
     if not text:
         return 0
     
-    if use_accurate and TIKTOKEN_AVAILABLE:
+    if TIKTOKEN_AVAILABLE:
         try:
             tokenizer = get_tokenizer()
             if tokenizer:
                 return len(tokenizer.encode(text))
         except Exception as e:
-            logging.warning(f"tiktoken failed: {e}. Falling back to heuristic estimation.")
+            logging.warning(f"tiktoken failed: {e}.")
     
-    # Fallback to heuristic estimation
-    cleaned_text = re.sub(r'\s+', ' ', text.strip())
-    return int(len(cleaned_text) * DEFAULT_TOKENS_PER_CHAR)
+    # If tiktoken is not available or fails, raise an error
+    raise RuntimeError("Accurate token counting requires tiktoken to be installed. Please install tiktoken: pip install tiktoken")
 
 
 def estimate_synthesis_tokens(
@@ -115,11 +127,10 @@ def estimate_synthesis_tokens(
     content: str,
     conversation_history: str,
     files_no_info: str,
-    files_errors: str,
-    use_accurate: bool = USE_ACCURATE_TOKEN_COUNTING
+    files_errors: str
 ) -> int:
     """
-    Estimate total tokens for a synthesis operation.
+    Estimate total tokens for a synthesis operation using tiktoken.
     
     Parameters
     ----------
@@ -133,8 +144,6 @@ def estimate_synthesis_tokens(
         List of files with no information.
     files_errors : str
         List of files with errors.
-    use_accurate : bool
-        Whether to use tiktoken for accurate counting (if available).
         
     Returns
     -------
@@ -142,15 +151,14 @@ def estimate_synthesis_tokens(
         Estimated total tokens for the synthesis operation.
     """
     # Estimate tokens for each component
-    question_tokens = estimate_tokens(question, use_accurate)
-    content_tokens = estimate_tokens(content, use_accurate)
-    history_tokens = estimate_tokens(conversation_history, use_accurate)
-    no_info_tokens = estimate_tokens(files_no_info, use_accurate)
-    errors_tokens = estimate_tokens(files_errors, use_accurate)
+    question_tokens = estimate_tokens(question)
+    content_tokens = estimate_tokens(content)
+    history_tokens = estimate_tokens(conversation_history)
+    no_info_tokens = estimate_tokens(files_no_info)
+    errors_tokens = estimate_tokens(files_errors)
     
     # Add system prompt and response buffer
     total_tokens = (
-        SYSTEM_PROMPT_TOKENS +
         question_tokens +
         content_tokens +
         history_tokens +
@@ -168,11 +176,10 @@ def create_content_batches(
     question: str,
     conversation_history: str,
     files_no_info: str,
-    files_errors: str,
-    use_accurate: bool = USE_ACCURATE_TOKEN_COUNTING
+    files_errors: str
 ) -> List[Tuple[List[Document], int]]:
     """
-    Create batches of documents that fit within token limits.
+    Create batches of documents that fit within token limits using tiktoken.
     
     Parameters
     ----------
@@ -188,8 +195,6 @@ def create_content_batches(
         List of files with no information.
     files_errors : str
         List of files with errors.
-    use_accurate : bool
-        Whether to use tiktoken for accurate counting (if available).
         
     Returns
     -------
@@ -206,8 +211,7 @@ def create_content_batches(
         content="",  # Empty content to get just overhead
         conversation_history=conversation_history,
         files_no_info=files_no_info,
-        files_errors=files_errors,
-        use_accurate=use_accurate
+        files_errors=files_errors
     )
     
     # Ensure overhead doesn't exceed the batch limit
@@ -227,7 +231,7 @@ def create_content_batches(
         formatted_content = f"--- File: {fname} | Page: {page} ---\n{doc.page_content}"
         
         # Estimate tokens for this document
-        doc_tokens = estimate_tokens(formatted_content, use_accurate)
+        doc_tokens = estimate_tokens(formatted_content)
         
         # Check if this single document exceeds the available tokens
         if doc_tokens > available_tokens:
@@ -237,8 +241,8 @@ def create_content_batches(
             )
             
             # Truncate the document content to fit within limits
-            # Estimate how many characters we can keep
-            max_chars = int(available_tokens / DEFAULT_TOKENS_PER_CHAR)
+            # Estimate how many characters we can keep (rough estimate: 4 chars per token)
+            max_chars = int(available_tokens * 4)
             truncated_content = doc.page_content[:max_chars] + "\n\n[Content truncated due to token limits]"
             
             # Create a new document with truncated content
@@ -255,7 +259,7 @@ def create_content_batches(
             
             # Add the truncated document as its own batch
             truncated_formatted = f"--- File: {fname} | Page: {page} ---\n{truncated_content}"
-            truncated_tokens = estimate_tokens(truncated_formatted, use_accurate)
+            truncated_tokens = estimate_tokens(truncated_formatted)
             batches.append(([truncated_doc], truncated_tokens + overhead_tokens))
             
         elif current_tokens + doc_tokens > available_tokens and current_batch:
@@ -267,6 +271,106 @@ def create_content_batches(
             # Add to current batch
             current_batch.append(doc)
             current_tokens += doc_tokens
+    
+    # Add the last batch if it has content
+    if current_batch:
+        batches.append((current_batch, current_tokens + overhead_tokens))
+    
+    return batches
+
+
+def create_individual_file_response_batches(
+    individual_file_responses: Dict[str, str],
+    allowed_files: List[str],
+    max_tokens_per_batch: int,
+    question: str,
+    conversation_history: str
+) -> List[Tuple[List[str], int]]:
+    """
+    Create batches of individual file responses that fit within token limits using tiktoken.
+    
+    This function groups files based on their response token count rather than file count,
+    ensuring that each batch stays within the specified token limit.
+    
+    Parameters
+    ----------
+    individual_file_responses : Dict[str, str]
+        Mapping of filenames to their individual LLM responses.
+    allowed_files : List[str]
+        List of files in the order they should be processed.
+    max_tokens_per_batch : int
+        Maximum tokens allowed per batch.
+    question : str
+        The user's question.
+    conversation_history : str
+        Formatted conversation history.
+        
+    Returns
+    -------
+    List[Tuple[List[str], int]]
+        List of (file_list, estimated_tokens) tuples for each batch.
+    """
+    batches = []
+    current_batch = []
+    current_tokens = 0
+    
+    # Calculate overhead tokens (question, history, etc.)
+    overhead_tokens = estimate_synthesis_tokens(
+        question=question,
+        content="",  # Empty content to get just overhead
+        conversation_history=conversation_history,
+        files_no_info="",  # Empty for individual processing
+        files_errors=""    # Empty for individual processing
+    )
+    
+    # Ensure overhead doesn't exceed the batch limit
+    if overhead_tokens >= max_tokens_per_batch:
+        logging.warning(
+            f"Overhead tokens ({overhead_tokens:,}) exceed batch limit ({max_tokens_per_batch:,}). "
+            f"Using minimum batch size."
+        )
+        available_tokens = 1000  # Minimum available tokens
+    else:
+        available_tokens = max_tokens_per_batch - overhead_tokens
+    
+    for filename in allowed_files:
+        if filename not in individual_file_responses:
+            # Skip files without responses
+            continue
+            
+        response = individual_file_responses[filename]
+        
+        # Format the response for batching (same format as used in hierarchical consolidation)
+        formatted_response = f"--- File: {filename} ---\n{response}"
+        
+        # Estimate tokens for this formatted response
+        response_tokens = estimate_tokens(formatted_response)
+        
+        # Check if this single response exceeds the available tokens
+        if response_tokens > available_tokens:
+            logging.warning(
+                f"File response {filename} exceeds token limit ({response_tokens:,} > {available_tokens:,}). "
+                f"Creating separate batch for this file."
+            )
+            
+            # If we have a current batch, save it and start fresh
+            if current_batch:
+                batches.append((current_batch, current_tokens + overhead_tokens))
+                current_batch = []
+                current_tokens = 0
+            
+            # Add the large response as its own batch
+            batches.append(([filename], response_tokens + overhead_tokens))
+            
+        elif current_tokens + response_tokens > available_tokens and current_batch:
+            # Save current batch and start a new one
+            batches.append((current_batch, current_tokens + overhead_tokens))
+            current_batch = [filename]
+            current_tokens = response_tokens
+        else:
+            # Add to current batch
+            current_batch.append(filename)
+            current_tokens += response_tokens
     
     # Add the last batch if it has content
     if current_batch:
@@ -328,14 +432,12 @@ class GraphState(TypedDict):
         Maximum tokens allowed per synthesis batch.
     batch_results : Optional[List[str]]
         Results from processing multiple batches.
-    use_accurate_token_counting : bool
-        Whether to use tiktoken for accurate token counting (if available).
     process_files_individually : bool
         Whether to process each file individually and then consolidate responses.
     individual_file_responses : Optional[Dict[str, str]]
         Mapping of filenames to their individual LLM responses.
     hierarchical_consolidation_results : Optional[List[str]]
-        Results from hierarchical consolidation of individual file responses in batches of 10.
+        Results from hierarchical consolidation of individual file responses in token-based batches.
     show_detailed_individual_responses : bool
         Whether to include individual document responses in the final output.
     detailed_responses_for_ui : Optional[str]
@@ -365,13 +467,159 @@ class GraphState(TypedDict):
     streaming_callback: Optional[Callable[[str], None]]
     max_tokens_per_batch: int
     batch_results: Optional[List[str]]
-    use_accurate_token_counting: bool
     process_files_individually: bool
     individual_file_responses: Optional[Dict[str, str]]
     hierarchical_consolidation_results: Optional[List[str]]
     show_detailed_individual_responses: bool
     detailed_responses_for_ui: Optional[str]
     rate_limit_error_occurred: bool
+
+
+def _is_content_policy_error(e: Exception) -> bool:
+    """
+    Determine whether an exception message indicates an AI content‑policy
+    violation.
+
+    Parameters
+    ----------
+    e : Exception
+        Exception raised by the LLM provider.
+
+    Returns
+    -------
+    bool
+        ``True`` if the exception message contains any keyword that signals
+        a policy‑related block; otherwise ``False``.
+    """
+    error_message = str(e).lower()
+    keywords = [
+        "content filter",
+        "content management policy",
+        "responsible ai",
+        "safety policy",
+        "prompt blocked"  # Common for Azure
+    ]
+    return any(keyword in error_message for keyword in keywords)
+
+
+def _is_rate_limit_error(e: Exception) -> bool:
+    """
+    Determine whether an exception indicates a rate limit (429) error.
+
+    Parameters
+    ----------
+    e : Exception
+        Exception raised by the LLM provider.
+
+    Returns
+    -------
+    bool
+        ``True`` if the exception indicates a rate limit error; otherwise ``False``.
+    """
+    # Check status code if available
+    if hasattr(e, 'status_code') and e.status_code == 429:
+        return True
+    
+    # Check error message for rate limit indicators
+    error_message = str(e).lower()
+    rate_limit_keywords = [
+        "rate limit",
+        "too many requests",
+        "429",
+        "quota exceeded",
+        "rate exceeded"
+    ]
+    return any(keyword in error_message for keyword in rate_limit_keywords)
+
+
+def _is_token_limit_error(e: Exception) -> bool:
+    """
+    Determine whether an exception indicates a token limit exceeded (400) error.
+
+    Parameters
+    ----------
+    e : Exception
+        Exception raised by the LLM provider.
+
+    Returns
+    -------
+    bool
+        ``True`` if the exception indicates a token limit error; otherwise ``False``.
+    """
+    error_message = str(e).lower()
+    token_limit_keywords = [
+        "token",
+        "context length",
+        "maximum context length",
+        "input too long",
+        "prompt too long",
+        "context window"
+    ]
+    
+    # Check if it's specifically a token limit error by keywords
+    if any(keyword in error_message for keyword in token_limit_keywords):
+        return True
+    
+    # Check status code if available (400 with any message)
+    if hasattr(e, 'status_code') and e.status_code == 400:
+        return True
+    
+    return False
+
+
+def _handle_llm_error(
+    e: Exception, 
+    streaming_callback: Optional[Callable[[str], None]] = None,
+    node_name: str = "unknown"
+) -> str:
+    """
+    Handle LLM errors and provide appropriate user feedback via callback.
+    
+    Parameters
+    ----------
+    e : Exception
+        The exception that occurred.
+    streaming_callback : Optional[Callable[[str], None]]
+        Callback function to inform the user of the error.
+    node_name : str
+        Name of the node where the error occurred.
+        
+    Returns
+    -------
+    str
+        Error message to return to the user.
+    """
+    if _is_rate_limit_error(e):
+        logging.warning(f"[{node_name}] Rate limit error: {e}")
+        
+        if streaming_callback:
+            streaming_callback(RATE_LIMIT_MESSAGE)
+        
+        # Raise custom exception to stop workflow
+        raise RateLimitError(RATE_LIMIT_MESSAGE)
+    
+    elif _is_token_limit_error(e):
+        logging.error(f"[{node_name}] Token limit error: {e}")
+        
+        if streaming_callback:
+            streaming_callback(TOKEN_LIMIT_MESSAGE)
+        
+        # Raise custom exception to stop workflow
+        raise TokenLimitError(TOKEN_LIMIT_MESSAGE)
+    
+    elif _is_content_policy_error(e):
+        logging.warning(f"[{node_name}] Content policy violation: {e}")
+        return CONTENT_POLICY_MESSAGE
+    
+    else:
+        # Generic error handling
+        error_message = f"An error occurred during processing: {str(e)}"
+        logging.error(f"[{node_name}] Generic error: {e}")
+        
+        if streaming_callback:
+            streaming_callback(error_message)
+        
+        return error_message
 
 
 def _log_node_start(node_name: str) -> float:
@@ -428,21 +676,15 @@ def _update_progress_callback(
     metadata : Optional[Dict[str, Any]]
         Additional metadata for progress updates (e.g., counters).
     """
-    # Add debugging
-    #print(f"[DEBUG] _update_progress_callback called: node={node_name}, stage={stage}")
-    
     # Try to get progress callback from state first, then fall back to global
     progress_cb = state.get("__progress_cb__")
     if not progress_cb:
         global GLOBAL_PROGRESS_CB
         progress_cb = GLOBAL_PROGRESS_CB
     
-    #print(f"[DEBUG] Progress callback exists: {progress_cb is not None}")
-    
     if progress_cb:
         # Get the base progress message
         base_message = get_progress_message(stage, node_name)
-        #print(f"[DEBUG] Base message: {base_message}")
         
         # If we have metadata with counters, use a custom message
         if metadata and "completed" in metadata and "total" in metadata:
@@ -464,21 +706,16 @@ def _update_progress_callback(
         else:
             message = base_message
         
-        #print(f"[DEBUG] Final message: {message}")
-        
         try:
             progress_cb(
                 message,
                 "info",
                 {"node": node_name, "stage": stage, **(metadata or {})}
             )
-            #print(f"[DEBUG] Progress callback executed successfully")
         except Exception as e:
-            #print(f"[DEBUG] Error in progress callback: {e}")
             pass
     else:
         pass
-        #print(f"[DEBUG] No progress callback found in state")
 
 
 def instantiate_embeddings(state: GraphState) -> GraphState:
@@ -515,11 +752,7 @@ def instantiate_embeddings(state: GraphState) -> GraphState:
             endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
             api_key = os.getenv("AZURE_OPENAI_API_KEY")
             api_version = os.getenv("AZURE_OPENAI_API_4p1_VERSION")
-            
-            logging.info(f"[instantiate_embeddings_node] Configuration - Deployment: {deployment}, API Version: {api_version}")
-            logging.info(f"[instantiate_embeddings_node] Configuration - Endpoint: {endpoint}")
-            logging.info(f"[instantiate_embeddings_node] Configuration - API Key: {'***' if api_key else 'NOT SET'}")
-            
+                        
             new_embeddings = AzureOpenAIEmbeddings(
                 azure_deployment=deployment,
                 azure_endpoint=endpoint,
@@ -581,24 +814,20 @@ def instantiate_llm_large(state: GraphState) -> GraphState:
         try:
             logging.info("[instantiate_llm_large_node] Creating large LLM instance")
             
-            # Log configuration for debugging
             deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT")
             api_version = os.getenv("AZURE_OPENAI_API_4p1_VERSION")
             endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
             api_key = os.getenv("AZURE_OPENAI_API_KEY")
-            
-            logging.info(f"[instantiate_llm_large_node] Configuration - Deployment: {deployment}, API Version: {api_version}")
-            logging.info(f"[instantiate_llm_large_node] Configuration - Endpoint: {endpoint}")
-            logging.info(f"[instantiate_llm_large_node] Configuration - API Key: {'***' if api_key else 'NOT SET'}")
-            
+
             new_llm = AzureChatOpenAI(
                 temperature=0.2,
                 api_version=api_version,
                 azure_deployment=deployment,
                 max_tokens=MAX_COMPLETION_TOKENS,
+                request_timeout=300,  # 5 minute timeout
             )
             
-            logging.info("[instantiate_llm_large_node] Large LLM instance created successfully")
+            logging.info(f"[instantiate_llm_large_node] Large LLM instance created successfully with max_tokens={MAX_COMPLETION_TOKENS:,}")
             state = {**state, "llm_large": new_llm}
             
         except Exception as e:
@@ -652,24 +881,20 @@ def instantiate_llm_small(state: GraphState) -> GraphState:
         try:
             logging.info("[instantiate_llm_small_node] Creating small LLM instance")
             
-            # Log configuration for debugging
             deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NANO")
             api_version = os.getenv("AZURE_OPENAI_API_4p1_VERSION")
             endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
             api_key = os.getenv("AZURE_OPENAI_API_KEY")
-            
-            logging.info(f"[instantiate_llm_small_node] Configuration - Deployment: {deployment}, API Version: {api_version}")
-            logging.info(f"[instantiate_llm_small_node] Configuration - Endpoint: {endpoint}")
-            logging.info(f"[instantiate_llm_small_node] Configuration - API Key: {'***' if api_key else 'NOT SET'}")
-            
+
             new_llm = AzureChatOpenAI(
                 temperature=0.2,
                 api_version=api_version,
                 azure_deployment=deployment,
                 max_tokens=MAX_COMPLETION_TOKENS,
+                request_timeout=300,  # 5 minute timeout
             )
             
-            logging.info("[instantiate_llm_small_node] Small LLM instance created successfully")
+            logging.info(f"[instantiate_llm_small_node] Small LLM instance created successfully with max_tokens={MAX_COMPLETION_TOKENS:,}")
             state = {**state, "llm_small": new_llm}
             
         except Exception as e:
@@ -971,16 +1196,22 @@ async def generate_multi_queries_node(state: GraphState) -> GraphState:
         )
 
     except Exception as e_query_gen:
-        if is_content_policy_error(e_query_gen):
-            logging.warning(
-                "[generate_multi_queries_node] Content policy violation during "
-                f"query generation. Using original question only. Error: {e_query_gen}"
-            )
-        else:
-            logging.exception(
-                f"[generate_multi_queries_node] Failed to generate alt queries: {e_query_gen}"
-            )
-        # In both cases, we fall back to the original question
+        logging.error(f"[generate_multi_queries_node] Failed to generate alt queries: {e_query_gen}")
+        logging.error(f"[generate_multi_queries_node] Error type: {type(e_query_gen).__name__}")
+        logging.error(f"[generate_multi_queries_node] Error details: {e_query_gen}")
+        
+        # Log additional context for debugging
+        if hasattr(e_query_gen, 'response'):
+            logging.error(f"[generate_multi_queries_node] API Response: {e_query_gen.response}")
+        if hasattr(e_query_gen, 'status_code'):
+            logging.error(f"[generate_multi_queries_node] Status Code: {e_query_gen.status_code}")
+        if hasattr(e_query_gen, 'body'):
+            logging.error(f"[generate_multi_queries_node] Response Body: {e_query_gen.body}")
+        
+        # Use the new error handling function
+        error_msg = _handle_llm_error(e_query_gen, None, "generate_multi_queries_node")
+        logging.warning(f"[generate_multi_queries_node] {error_msg} - Using original question only.")
+        # In all cases, we fall back to the original question
 
     # Generate embeddings for all queries
     try:
@@ -1202,7 +1433,6 @@ async def process_batches_node(state: GraphState) -> GraphState:
     
     if process_files_individually:
         # Route to individual file processing - skip batch processing
-        logging.info("[process_batches_node] Individual file processing mode - skipping batch processing")
         _update_progress_callback(state, "process_batches_node", "routing_to_individual_processing")
         return state
     
@@ -1229,13 +1459,12 @@ async def process_batches_node(state: GraphState) -> GraphState:
         content=all_content,
         conversation_history=conversation_history_str,
         files_no_info=", ".join(no_info_list) if no_info_list else "None",
-        files_errors=", ".join(error_list) if error_list else "None",
-        use_accurate=state.get("use_accurate_token_counting", USE_ACCURATE_TOKEN_COUNTING)
+        files_errors=", ".join(error_list) if error_list else "None"
     )
     
     logging.info(f"[process_batches_node] Total estimated tokens: {total_estimated_tokens:,}")
     logging.info(f"[process_batches_node] Max tokens per batch: {max_tokens_per_batch:,}")
-    logging.info(f"[process_batches_node] Using {'accurate' if state.get('use_accurate_token_counting', USE_ACCURATE_TOKEN_COUNTING) and TIKTOKEN_AVAILABLE else 'heuristic'} token counting")
+    logging.info(f"[process_batches_node] Using accurate token counting with tiktoken")
     
     if total_estimated_tokens <= max_tokens_per_batch:
         # Can process all documents in one batch
@@ -1253,8 +1482,7 @@ async def process_batches_node(state: GraphState) -> GraphState:
             question=question,
             conversation_history=conversation_history_str,
             files_no_info=", ".join(no_info_list) if no_info_list else "None",
-            files_errors=", ".join(error_list) if error_list else "None",
-            use_accurate=state.get("use_accurate_token_counting", USE_ACCURATE_TOKEN_COUNTING)
+            files_errors=", ".join(error_list) if error_list else "None"
         )
         
         logging.info(f"[process_batches_node] Created {len(batches)} batches")
@@ -1353,7 +1581,8 @@ async def _stream_final_generation(
     no_info_list: List[str],
     error_list: List[str],
     streaming_callback: Optional[Callable[[str], None]],
-    additional_variables: Optional[Dict[str, Any]] = None
+    additional_variables: Optional[Dict[str, Any]] = None,
+    max_tokens_override: Optional[int] = None
 ) -> str:
     """
     Stream the final generation using the LLM with a callback for real-time updates.
@@ -1385,8 +1614,26 @@ async def _stream_final_generation(
     try:
         logging.info("[_stream_final_generation] Creating streaming chain")
         
+        # Log LLM configuration for debugging
+        if hasattr(llm_instance, 'max_tokens'):
+            logging.info(f"[_stream_final_generation] LLM max_tokens: {llm_instance.max_tokens:,}")
+        if hasattr(llm_instance, 'azure_deployment'):
+            logging.info(f"[_stream_final_generation] LLM deployment: {llm_instance.azure_deployment}")
+        
+        # If a max_tokens_override was provided, bind it to the LLM so the
+        # OpenAI request enforces that tighter cap (this avoids gigantic,
+        # runaway completions).
+        if max_tokens_override is not None:
+            try:
+                llm_runnable = llm_instance.bind(max_tokens=max_tokens_override)
+            except Exception:
+                # Fallback: if .bind is unsupported, just use the original instance.
+                llm_runnable = llm_instance
+        else:
+            llm_runnable = llm_instance
+
         # Create the streaming chain
-        chain = combo_prompt | llm_instance | StrOutputParser()
+        chain = combo_prompt | llm_runnable | StrOutputParser()
 
         # Prepare the input
         input_data = {
@@ -1412,6 +1659,18 @@ async def _stream_final_generation(
                     if chunk:
                         full_response += chunk
                         streaming_callback(chunk)
+                
+                # Check if response exceeds MAX_COMPLETION_TOKENS
+                estimated_tokens = len(full_response) // 4
+                if estimated_tokens > MAX_COMPLETION_TOKENS:
+                    logging.error(f"[_stream_final_generation] Response estimated at {estimated_tokens:,} tokens, exceeds MAX_COMPLETION_TOKENS ({MAX_COMPLETION_TOKENS:,})")
+                    logging.error(f"[_stream_final_generation] Response length: {len(full_response):,} characters")
+                    
+                    # Truncate to a reasonable length
+                    max_chars = MAX_COMPLETION_TOKENS * 4
+                    full_response = full_response[:max_chars] + "\n\n[Response truncated due to token limit]"
+                    logging.warning(f"[_stream_final_generation] Truncated response to {len(full_response):,} characters")
+                
                 logging.info(f"[_stream_final_generation] Streaming completed - response length: {len(full_response)}")
                 return full_response
             except Exception as stream_error:
@@ -1427,6 +1686,18 @@ async def _stream_final_generation(
             logging.info("[_stream_final_generation] Using regular invocation mode")
             try:
                 result = await chain.ainvoke(input_data)
+                
+                # Check if response exceeds MAX_COMPLETION_TOKENS
+                estimated_tokens = len(result) // 4
+                if estimated_tokens > MAX_COMPLETION_TOKENS:
+                    logging.error(f"[_stream_final_generation] Response estimated at {estimated_tokens:,} tokens, exceeds MAX_COMPLETION_TOKENS ({MAX_COMPLETION_TOKENS:,})")
+                    logging.error(f"[_stream_final_generation] Response length: {len(result):,} characters")
+                    
+                    # Truncate to a reasonable length
+                    max_chars = MAX_COMPLETION_TOKENS * 4
+                    result = result[:max_chars] + "\n\n[Response truncated due to token limit]"
+                    logging.warning(f"[_stream_final_generation] Truncated response to {len(result):,} characters")
+                
                 logging.info(f"[_stream_final_generation] Regular invocation completed - response length: {len(result)}")
                 return result
             except Exception as invoke_error:
@@ -1451,12 +1722,8 @@ async def _stream_final_generation(
         if hasattr(e, 'body'):
             logging.error(f"[_stream_final_generation] Response Body: {e.body}")
         
-        if _is_content_policy_error(e):
-            logging.warning(f"[_stream_final_generation] Content policy violation during streaming generation: {e}")
-            return CONTENT_POLICY_MESSAGE
-        else:
-            logging.exception(f"[_stream_final_generation] Error during streaming generation: {e}")
-            return f"Generation error: {e}. Content: {content_llm[:200]}..."
+        # Use the new error handling function
+        return _handle_llm_error(e, streaming_callback, "_stream_final_generation")
 
 
 async def combine_answers_node(state: GraphState) -> GraphState:
@@ -1519,8 +1786,8 @@ async def combine_answers_node(state: GraphState) -> GraphState:
                 _update_progress_callback(state, "combine_answers_node", "combining_hierarchical_results")
                 
                 detailed_flag = state.get("detailed_response_desired", True)
-                llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
-                streaming_callback = state.get("streaming_callback")
+                llm_instance = state.get("llm_small") or state.get("llm_large")
+                streaming_callback = None
                 
                 # Get batch combination prompt for combining hierarchical results
                 batch_combination_prompt = get_batch_combination_prompt_template()
@@ -1554,8 +1821,8 @@ async def combine_answers_node(state: GraphState) -> GraphState:
                 _update_progress_callback(state, "combine_answers_node", "consolidating_individual_responses")
                 
                 detailed_flag = state.get("detailed_response_desired", True)
-                llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
-                streaming_callback = state.get("streaming_callback")
+                llm_instance = state.get("llm_small") or state.get("llm_large")
+                streaming_callback = None
                 
                 # Get consolidation prompt for individual file responses
                 consolidation_prompt = get_consolidation_prompt_template()
@@ -1590,7 +1857,7 @@ async def combine_answers_node(state: GraphState) -> GraphState:
             
             detailed_flag = state.get("detailed_response_desired", True)
             llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
-            streaming_callback = state.get("streaming_callback")
+            streaming_callback = None
             
             # Get batch combination prompt for combining batch results
             batch_combination_prompt = get_batch_combination_prompt_template()
@@ -1624,9 +1891,9 @@ async def combine_answers_node(state: GraphState) -> GraphState:
             _update_progress_callback(state, "combine_answers_node", "traditional_synthesis")
             
             detailed_flag = state.get("detailed_response_desired", True)
-            llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
+            llm_instance = state.get("llm_small") or state.get("llm_large")
             combo_prompt = get_synthesis_prompt_template()
-            streaming_callback = state.get("streaming_callback")
+            streaming_callback = None
 
             no_info_list: List[str] = []
             error_list: List[str] = []
@@ -1689,6 +1956,16 @@ async def combine_answers_node(state: GraphState) -> GraphState:
         # Store detailed responses in state for UI to access
         state_to_return["detailed_responses_for_ui"] = detailed_section
     
+    # If a streaming callback exists but we generated the answer without streaming,
+    # send the full answer once so the chat UI receives the response.
+    final_cb = state.get("streaming_callback")
+    if final_cb:
+        try:
+            final_cb(output_generation)
+        except Exception:
+            # Swallow any UI-side errors so they do not break the agent.
+            pass
+    
     state_to_return["generation"] = output_generation
     _log_node_end("combine_answers_node", start_time)
     return state_to_return
@@ -1721,7 +1998,7 @@ async def process_individual_files_node(state: GraphState) -> GraphState:
     documents_by_file = state.get("documents_by_file", {})
     conversation_history = state.get("conversation_history")
     detailed_flag = state.get("detailed_response_desired", True)
-    llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
+    llm_instance = state.get("llm_small") or state.get("llm_large")
     
     if not question or not allowed_files or not documents_by_file:
         logging.info("[process_individual_files_node] Missing required data. Skipping individual processing.")
@@ -1805,8 +2082,26 @@ async def process_individual_files_node(state: GraphState) -> GraphState:
                         conversation_history_str=conversation_history_str,
                         no_info_list=no_info_list,
                         error_list=error_list,
-                        streaming_callback=None  # Don't stream individual file responses
+                        streaming_callback=None,  # Don't stream individual file responses
+                        max_tokens_override=INDIVIDUAL_FILE_MAX_TOKENS
                     )
+                    
+                    # Check if response exceeds MAX_COMPLETION_TOKENS (rough estimate: 4 chars per token)
+                    estimated_tokens = len(file_response) // 4
+                    if estimated_tokens > MAX_COMPLETION_TOKENS:
+                        logging.error(f"[process_individual_files_node] Response for {filename} estimated at {estimated_tokens:,} tokens, exceeds MAX_COMPLETION_TOKENS ({MAX_COMPLETION_TOKENS:,})")
+                        logging.error(f"[process_individual_files_node] Response length: {len(file_response):,} characters")
+                        
+                        # Truncate to a reasonable length (roughly MAX_COMPLETION_TOKENS * 4 chars)
+                        max_chars = MAX_COMPLETION_TOKENS * 4
+                        file_response = file_response[:max_chars] + "\n\n[Response truncated due to token limit]"
+                        logging.warning(f"[process_individual_files_node] Truncated response to {len(file_response):,} characters")
+                    
+                    # Additional safety check for extremely long responses
+                    max_response_length = 50000  # characters (much higher than before)
+                    if len(file_response) > max_response_length:
+                        logging.error(f"[process_individual_files_node] Response for {filename} was {len(file_response):,} chars, truncating to {max_response_length:,}")
+                        file_response = file_response[:max_response_length] + "\n\n[Response truncated due to length limits]"
                     
                     logging.info(f"[process_individual_files_node] Completed async processing for {filename} ({len(file_response)} chars)")
                     await update_progress()
@@ -1814,8 +2109,7 @@ async def process_individual_files_node(state: GraphState) -> GraphState:
                     
                 except Exception as e:
                     # Log detailed error information
-                    error_msg = f"Error processing {filename}: {str(e)}"
-                    logging.error(f"[process_individual_files_node] {error_msg}")
+                    logging.error(f"[process_individual_files_node] Error processing {filename}: {e}")
                     logging.error(f"[process_individual_files_node] Error type: {type(e).__name__}")
                     logging.error(f"[process_individual_files_node] Error details: {e}")
                     
@@ -1826,6 +2120,9 @@ async def process_individual_files_node(state: GraphState) -> GraphState:
                         logging.error(f"[process_individual_files_node] Status Code: {e.status_code}")
                     if hasattr(e, 'body'):
                         logging.error(f"[process_individual_files_node] Response Body: {e.body}")
+                    
+                    # Use the new error handling function
+                    error_msg = _handle_llm_error(e, None, f"process_individual_files_node_{filename}")
                     
                     await update_progress()
                     return filename, error_msg
@@ -1973,16 +2270,19 @@ def create_graph_app() -> Graph:
 
 async def hierarchical_consolidation_node(state: GraphState) -> GraphState:
     """
-    Consolidate individual file responses in batches of 10 to ensure all information is preserved.
+    Consolidate individual file responses in token-based batches to ensure all information is preserved.
     
-    This node processes individual file responses in hierarchical batches of 10 documents each.
-    For example, if there are 29 documents, it will create 3 batch summaries:
-    - Batch 1: Documents 1-10
-    - Batch 2: Documents 11-20  
-    - Batch 3: Documents 21-29
+    This node processes individual file responses in hierarchical batches based on token count
+    rather than file count. Each batch is limited to MAX_TOKENS_PER_HIERARCHICAL_BATCH tokens
+    to ensure we stay within context window limits.
+    
+    For example, if there are 4 files with responses of 10k, 100k, 290k, and 150k tokens:
+    - Batch 1: Files 1, 2, 3 (400k tokens total)
+    - Batch 2: File 4 (150k tokens)
     
     This ensures that no information is lost when processing many documents, as each batch
-    summary preserves all important details from its constituent files.
+    summary preserves all important details from its constituent files while staying within
+    token limits.
     
     Parameters
     ----------
@@ -2006,18 +2306,22 @@ async def hierarchical_consolidation_node(state: GraphState) -> GraphState:
     # Only run if we're in individual file processing mode and have responses
     if not process_files_individually or not individual_file_responses or not allowed_files:
         logging.info("[hierarchical_consolidation_node] Skipping - not in individual file processing mode or no responses")
+        logging.info(f"[hierarchical_consolidation_node] process_files_individually: {process_files_individually}")
+        logging.info(f"[hierarchical_consolidation_node] individual_file_responses: {len(individual_file_responses) if individual_file_responses else 0}")
+        logging.info(f"[hierarchical_consolidation_node] allowed_files: {len(allowed_files) if allowed_files else 0}")
         return {**state, "hierarchical_consolidation_results": None}
     
-    # Check if we have enough files to warrant hierarchical consolidation (more than 10)
-    if len(allowed_files) <= 10:
+    # Check if we have enough files to warrant hierarchical consolidation (more than n)
+    logging.info(f"[hierarchical_consolidation_node] Checking file count: {len(allowed_files)} vs threshold: {MAX_FILES_FOR_HIERARCHICAL_CONSOLIDATION}")
+    if len(allowed_files) <= MAX_FILES_FOR_HIERARCHICAL_CONSOLIDATION:
         logging.info(f"[hierarchical_consolidation_node] Only {len(allowed_files)} files - no hierarchical consolidation needed")
         return {**state, "hierarchical_consolidation_results": None}
     
-    logging.info(f"[hierarchical_consolidation_node] Starting hierarchical consolidation for {len(allowed_files)} files")
+    logging.info(f"[hierarchical_consolidation_node] Starting token-based hierarchical consolidation for {len(allowed_files)} files")
     
     detailed_flag = state.get("detailed_response_desired", True)
-    llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
-    streaming_callback = state.get("streaming_callback")
+    llm_instance = state.get("llm_small") or state.get("llm_large")
+    streaming_callback = None
     conversation_history_str = _format_conversation_history(conversation_history)
     
     if not llm_instance:
@@ -2027,25 +2331,50 @@ async def hierarchical_consolidation_node(state: GraphState) -> GraphState:
     # Get the hierarchical consolidation prompt
     hierarchical_prompt = get_hierarchical_consolidation_prompt_template()
     
-    # Process files in batches of 10
-    BATCH_SIZE = 10
+    # Create token-based batches
+    batches = create_individual_file_response_batches(
+        individual_file_responses=individual_file_responses,
+        allowed_files=allowed_files,
+        max_tokens_per_batch=MAX_TOKENS_PER_HIERARCHICAL_BATCH,
+        question=question,
+        conversation_history=conversation_history_str
+    )
+    
+    total_batches = len(batches)
+    logging.info(f"[hierarchical_consolidation_node] Created {total_batches} token-based batches")
+    
+    # Log batch details for debugging
+    for i, (batch_files, batch_tokens) in enumerate(batches):
+        logging.info(f"[hierarchical_consolidation_node] Batch {i+1}: {len(batch_files)} files, {batch_tokens:,} tokens")
+        for filename in batch_files:
+            response_length = len(individual_file_responses.get(filename, ""))
+            logging.info(f"[hierarchical_consolidation_node]   - {filename}: {response_length:,} chars")
+    
+    # Process each batch
     batch_results = []
-    total_batches = (len(allowed_files) + BATCH_SIZE - 1) // BATCH_SIZE  # Ceiling division
     
-    logging.info(f"[hierarchical_consolidation_node] Processing {len(allowed_files)} files in {total_batches} batches of {BATCH_SIZE}")
-    
-    for batch_num in range(total_batches):
-        start_idx = batch_num * BATCH_SIZE
-        end_idx = min(start_idx + BATCH_SIZE, len(allowed_files))
-        batch_files = allowed_files[start_idx:end_idx]
+    for batch_num, (batch_files, batch_tokens) in enumerate(batches):
+        logging.info(f"[hierarchical_consolidation_node] Processing batch {batch_num + 1}/{total_batches} ({batch_tokens:,} tokens, {len(batch_files)} files)")
+        # Update progress callback with batch information
+        if total_batches == 1:
+            stage = "hierarchical_consolidation"
+        elif total_batches == 2:
+            stage = f"processing_batch_{batch_num + 1}_2"
+        elif total_batches == 3:
+            stage = f"processing_batch_{batch_num + 1}_3"
+        else:
+            stage = "hierarchical_consolidation"
         
-        logging.info(f"[hierarchical_consolidation_node] Processing batch {batch_num + 1}/{total_batches} (files {start_idx + 1}-{end_idx})")
         _update_progress_callback(
             state, 
             "hierarchical_consolidation_node", 
-            "hierarchical_consolidation",
+            stage,
             {"completed": batch_num, "total": total_batches, "current_batch": batch_num + 1}
         )
+        
+        # Add a more descriptive progress message for the UI
+        if streaming_callback:
+            streaming_callback(f"\n\n--- Processing hierarchical consolidation batch {batch_num + 1} of {total_batches} ({len(batch_files)} files, {batch_tokens:,} tokens) ---\n\n")
         
         # Format responses for this batch
         batch_responses = []
@@ -2059,7 +2388,9 @@ async def hierarchical_consolidation_node(state: GraphState) -> GraphState:
         batch_content = "\n\n".join(batch_responses)
         
         # Generate consolidated summary for this batch
+        batch_start_time = time.perf_counter()
         try:
+            logging.info(f"[hierarchical_consolidation_node] Starting LLM call for batch {batch_num + 1}")
             batch_summary = await _stream_final_generation(
                 question=question,
                 content_llm=batch_content,
@@ -2068,19 +2399,50 @@ async def hierarchical_consolidation_node(state: GraphState) -> GraphState:
                 conversation_history_str=conversation_history_str,
                 no_info_list=[],  # Already handled in individual processing
                 error_list=[],    # Already handled in individual processing
-                streaming_callback=None,  # Don't stream hierarchical consolidation
+                streaming_callback=streaming_callback,
                 additional_variables={"batch_number": batch_num + 1}
             )
             
+            batch_end_time = time.perf_counter()
+            batch_duration = batch_end_time - batch_start_time
+            # Check if response exceeds MAX_COMPLETION_TOKENS (rough estimate: 4 chars per token)
+            estimated_tokens = len(batch_summary) // 4
+            if estimated_tokens > MAX_COMPLETION_TOKENS:
+                logging.error(f"[hierarchical_consolidation_node] Batch {batch_num + 1} summary estimated at {estimated_tokens:,} tokens, exceeds MAX_COMPLETION_TOKENS ({MAX_COMPLETION_TOKENS:,})")
+                logging.error(f"[hierarchical_consolidation_node] Summary length: {len(batch_summary):,} characters")
+                
+                # Truncate to a reasonable length (roughly MAX_COMPLETION_TOKENS * 4 chars)
+                max_chars = MAX_COMPLETION_TOKENS * 4
+                batch_summary = batch_summary[:max_chars] + "\n\n[Summary truncated due to token limit]"
+                logging.warning(f"[hierarchical_consolidation_node] Truncated summary to {len(batch_summary):,} characters")
+            
+            # Additional safety check for extremely long responses
+            max_hierarchical_length = 100000  # characters (much higher than before)
+            if len(batch_summary) > max_hierarchical_length:
+                logging.error(f"[hierarchical_consolidation_node] Batch {batch_num + 1} summary was {len(batch_summary):,} chars, truncating to {max_hierarchical_length:,}")
+                batch_summary = batch_summary[:max_hierarchical_length] + "\n\n[Summary truncated due to length limits]"
+            
             batch_results.append(batch_summary)
-            logging.info(f"[hierarchical_consolidation_node] Completed batch {batch_num + 1} ({len(batch_summary)} chars)")
+            logging.info(f"[hierarchical_consolidation_node] Completed batch {batch_num + 1} ({len(batch_summary)} chars) in {batch_duration:.2f} seconds")
             
         except Exception as e:
-            error_msg = f"Error consolidating batch {batch_num + 1}: {str(e)}"
-            logging.error(f"[hierarchical_consolidation_node] {error_msg}")
+            logging.error(f"[hierarchical_consolidation_node] Error consolidating batch {batch_num + 1}: {e}")
+            logging.error(f"[hierarchical_consolidation_node] Error type: {type(e).__name__}")
+            logging.error(f"[hierarchical_consolidation_node] Error details: {e}")
+            
+            # Log additional context for debugging
+            if hasattr(e, 'response'):
+                logging.error(f"[hierarchical_consolidation_node] API Response: {e.response}")
+            if hasattr(e, 'status_code'):
+                logging.error(f"[hierarchical_consolidation_node] Status Code: {e.status_code}")
+            if hasattr(e, 'body'):
+                logging.error(f"[hierarchical_consolidation_node] Response Body: {e.body}")
+            
+            # Use the new error handling function
+            error_msg = _handle_llm_error(e, None, f"hierarchical_consolidation_node_batch_{batch_num + 1}")
             batch_results.append(error_msg)
     
-    logging.info(f"[hierarchical_consolidation_node] Completed hierarchical consolidation - {len(batch_results)} batch summaries created")
+    logging.info(f"[hierarchical_consolidation_node] Completed token-based hierarchical consolidation - {len(batch_results)} batch summaries created")
     _update_progress_callback(
         state, 
         "hierarchical_consolidation_node", 

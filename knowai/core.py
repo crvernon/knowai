@@ -8,10 +8,12 @@ from dotenv import load_dotenv
 from .agent import (
     GraphState,
     create_graph_app,
+    RateLimitError,
+    TokenLimitError,
 )
 from knowai.agent import GLOBAL_PROGRESS_CB
 
-K_CHUNKS_RETRIEVER_DEFAULT = 20
+K_CHUNKS_RETRIEVER_DEFAULT = 15
 K_CHUNKS_RETRIEVER_ALL_DOCS_DEFAULT = 100000
 MAX_CONVERSATION_TURNS_DEFAULT = 25
 N_QUERY_ALTERNATIVES_DEFAULT = 1
@@ -90,9 +92,7 @@ class KnowAIAgent:
         values. Unknown keys are ignored with a warning.
     log_graph : bool, default ``False``
         Whether to log the Mermaid diagram of the workflow graph.
-    use_accurate_token_counting : bool, default ``True``
-        Whether to use tiktoken for accurate token counting when available.
-        Falls back to heuristic estimation if tiktoken is not available.
+
     process_files_individually : bool, default ``False``
         Whether to process each file individually and then consolidate responses.
         When True, each file is processed separately by the LLM and then all
@@ -117,7 +117,7 @@ class KnowAIAgent:
         env_file_path: Optional[str] = None,
         initial_state_overrides: Optional[Dict[str, Any]] = None,
         log_graph: bool = False,
-        use_accurate_token_counting: bool = True,
+
         process_files_individually: bool = True
     ) -> None:
         if env_file_path and os.path.exists(env_file_path):
@@ -159,7 +159,7 @@ class KnowAIAgent:
             "__progress_cb__": None,
             "max_tokens_per_batch": int(1_000_000 * 0.9),  # GPT-4.1 with 10% safety margin
             "batch_results": None,
-            "use_accurate_token_counting": use_accurate_token_counting,
+
             "process_files_individually": process_files_individually,
             "individual_file_responses": None,
             "hierarchical_consolidation_results": None,
@@ -275,10 +275,6 @@ class KnowAIAgent:
         self.session_state["__progress_cb__"] = progress_cb
         self.session_state["streaming_callback"] = streaming_callback
 
-        # Add debugging
-        print(f"[DEBUG] process_turn: progress_cb exists: {progress_cb is not None}")
-        print(f"[DEBUG] process_turn: __progress_cb__ in session_state: {self.session_state.get('__progress_cb__') is not None}")
-
         if detailed_response_desired is not None:
             self.session_state["detailed_response_desired"] = detailed_response_desired
 
@@ -317,10 +313,32 @@ class KnowAIAgent:
         _agent_mod.GLOBAL_PROGRESS_CB = progress_cb
         try:
             updated_state = await self.graph_app.ainvoke(self.session_state)  # type: ignore
+        except RateLimitError as e:
+            # Rate limit error - stop workflow and return error message
+            logging.warning(f"Rate limit error caught in process_turn: {e}")
+            return {
+                "generation": str(e),
+                "documents_by_file": None,
+                "raw_documents_for_synthesis": None,
+                "detailed_responses": None,
+            }
+        except TokenLimitError as e:
+            # Token limit error - stop workflow and return error message
+            logging.error(f"Token limit error caught in process_turn: {e}")
+            return {
+                "generation": str(e),
+                "documents_by_file": None,
+                "raw_documents_for_synthesis": None,
+                "detailed_responses": None,
+            }
         finally:
             # Clear the callback on the agent module so it does not leak
             _agent_mod.GLOBAL_PROGRESS_CB = None
         self.session_state.update(updated_state)  # type: ignore
+        
+        # Ensure detailed responses are properly transferred from workflow state
+        if "detailed_responses_for_ui" in updated_state:
+            self.session_state["detailed_responses_for_ui"] = updated_state["detailed_responses_for_ui"]
 
         assistant_response_str = self.session_state.get(
             "generation", "I'm sorry, I couldn't formulate a response."
