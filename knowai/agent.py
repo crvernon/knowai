@@ -1534,7 +1534,7 @@ async def combine_answers_node(state: GraphState) -> GraphState:
                 detailed_flag = state.get("detailed_response_desired", True)
                 # llm_instance = state.get("llm_small") or state.get("llm_large")
                 llm_instance = state.get("llm_large")
-                streaming_callback = None
+                streaming_callback = state.get("streaming_callback")
                 
                 # Get batch combination prompt for combining hierarchical results
                 batch_combination_prompt = get_batch_combination_prompt_template()
@@ -1570,7 +1570,7 @@ async def combine_answers_node(state: GraphState) -> GraphState:
                 detailed_flag = state.get("detailed_response_desired", True)
                 # llm_instance = state.get("llm_small") or state.get("llm_large")
                 llm_instance = state.get("llm_large")
-                streaming_callback = None
+                streaming_callback = state.get("streaming_callback")
                 
                 # Get consolidation prompt for individual file responses
                 consolidation_prompt = get_consolidation_prompt_template()
@@ -1607,7 +1607,7 @@ async def combine_answers_node(state: GraphState) -> GraphState:
             # llm_instance = state.get("llm_large") if detailed_flag else state.get("llm_small")
             llm_instance = state.get("llm_large")
 
-            streaming_callback = None
+            streaming_callback = state.get("streaming_callback")
             
             # Get batch combination prompt for combining batch results
             batch_combination_prompt = get_batch_combination_prompt_template()
@@ -1644,7 +1644,7 @@ async def combine_answers_node(state: GraphState) -> GraphState:
             # llm_instance = state.get("llm_small") or state.get("llm_large")
             llm_instance = state.get("llm_large")
             combo_prompt = get_synthesis_prompt_template()
-            streaming_callback = None
+            streaming_callback = state.get("streaming_callback")
 
             no_info_list: List[str] = []
             error_list: List[str] = []
@@ -2074,7 +2074,7 @@ async def hierarchical_consolidation_node(state: GraphState) -> GraphState:
     detailed_flag = state.get("detailed_response_desired", True)
     # llm_instance = state.get("llm_small") or state.get("llm_large")
     llm_instance = state.get("llm_large")
-    streaming_callback = None
+    streaming_callback = state.get("streaming_callback")
     conversation_history_str = _format_conversation_history(conversation_history)
     
     if not llm_instance:
