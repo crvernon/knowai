@@ -1,5 +1,33 @@
 import logging
+import os
 import tiktoken
+from typing import Optional, Dict
+
+
+def get_azure_credentials() -> Optional[Dict[str, str]]:
+    """
+    Get Azure OpenAI credentials from environment variables.
+    
+    Returns
+    -------
+    Optional[Dict[str, str]]
+        Dictionary containing Azure credentials if available, None otherwise.
+    """
+    api_key = os.getenv("AZURE_OPENAI_API_KEY")
+    azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    embeddings_deployment = os.getenv("AZURE_EMBEDDINGS_DEPLOYMENT", "text-embedding-3-large")
+    embeddings_api_version = os.getenv("AZURE_OPENAI_EMBEDDINGS_API_VERSION", "2024-02-01")
+    
+    if not api_key or not azure_endpoint:
+        logging.error("Azure OpenAI credentials not found in environment variables.")
+        return None
+        
+    return {
+        "api_key": api_key,
+        "azure_endpoint": azure_endpoint,
+        "embeddings_deployment": embeddings_deployment,
+        "embeddings_api_version": embeddings_api_version,
+    }
 
 
 def get_tokenizer(encoding: str = "cl100k_base"):

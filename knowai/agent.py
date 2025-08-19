@@ -505,7 +505,7 @@ def instantiate_embeddings(state: GraphState) -> GraphState:
                 azure_deployment=deployment,
                 azure_endpoint=endpoint,
                 api_key=api_key,
-                openai_api_version=api_version
+                api_version=api_version
             )
             
             logging.info("[instantiate_embeddings_node] Embeddings model created successfully")

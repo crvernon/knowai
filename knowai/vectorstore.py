@@ -17,6 +17,7 @@ import logging
 from typing import List, Optional, Dict, Any
 from tqdm import tqdm
 import pandas as pd
+from collections import defaultdict
 
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
@@ -33,10 +34,11 @@ def process_pdfs_to_documents(
     metadata_map: dict,
     existing_files: set,
     text_splitter: RecursiveCharacterTextSplitter,
+    min_chunk_chars: int = 20,
 ) -> List[Document]:
     """
     Process PDF files in a directory, split into chunks, and return a list of Document objects.
-    Skips files not in metadata_map or already in existing_files.
+    Processes all PDFs. If a file is missing from metadata_map, minimal metadata will be used. Each chunk will include 'file_name' and 'page'. Very short chunks (length < min_chunk_chars) are skipped.
     
     Parameters
     ----------
@@ -48,6 +50,8 @@ def process_pdfs_to_documents(
         Set of filenames already processed
     text_splitter : RecursiveCharacterTextSplitter
         Text splitter instance for chunking
+    min_chunk_chars : int, default 20
+        Minimum number of characters required for a chunk to be added.
         
     Returns
     -------
@@ -55,15 +59,13 @@ def process_pdfs_to_documents(
         List of Document objects with chunked text and metadata
     """
     new_docs: List[Document] = []
-    pdf_files = [f for f in os.listdir(directory_path) if f.lower().endswith(".pdf")]
+    pdf_files = sorted([f for f in os.listdir(directory_path) if f.lower().endswith(".pdf")])
     
     for filename in tqdm(pdf_files, desc="Processing PDF files"):
         if filename not in metadata_map:
-            logger.warning(f"Skipping {filename}: not found in metadata parquet.")
-            continue
+            logger.warning(f"{filename} not found in metadata parquet. Proceeding with minimal metadata.")
         if filename in existing_files:
-            logger.info(f"Skipping {filename}: already in vector store.")
-            continue
+            logger.info(f"{filename} appears in existing vector store; continuing to process pages (dedup handled later).")
             
         file_path = os.path.join(directory_path, filename)
         try:
@@ -75,7 +77,17 @@ def process_pdfs_to_documents(
         for page_num in range(len(doc)):
             try:
                 page = doc.load_page(page_num)
-                text = page.get_text()
+                # Try standard text extraction; fall back to block-based if empty
+                text = (page.get_text("text") or "").strip()
+                if not text:
+                    try:
+                        blocks = page.get_text("blocks") or []
+                        # blocks: list of tuples (x0, y0, x1, y1, text, block_no, block_type)
+                        # sort by top-left corner (y0, x0) to approximate reading order
+                        blocks_sorted = sorted([b for b in blocks if len(b) >= 5 and b[4]], key=lambda b: (b[1], b[0]))
+                        text = "\n".join(b[4] for b in blocks_sorted).strip()
+                    except Exception:
+                        text = ""
             except Exception as e:
                 logger.error(f"Error reading page {page_num+1} of {filename}: {e}")
                 continue
@@ -84,13 +96,18 @@ def process_pdfs_to_documents(
                 continue
                 
             chunks = text_splitter.split_text(text)
-            for chunk in chunks:
-                meta = dict(metadata_map[filename])
-                meta["page"] = page_num + 1
-                new_docs.append(Document(
-                    page_content=chunk,
-                    metadata=meta
-                ))
+            for i, chunk in enumerate(chunks, start=1):
+                c = (chunk or "").strip()
+                if len(c) < min_chunk_chars:
+                    continue
+                base_meta = dict(metadata_map.get(filename, {}))
+                base_meta.update({
+                    "file_name": filename,
+                    "source_path": os.path.join(directory_path, filename),
+                    "page": page_num + 1,
+                    "chunk_index": i,
+                })
+                new_docs.append(Document(page_content=c, metadata=base_meta))
         doc.close()
         
     return new_docs
@@ -155,20 +172,25 @@ def get_retriever_from_docs(
     else:
         vectorstore = None
 
-    # Determine which files are already present
+    # Determine which files and pages are already present
     existing_files = set()
+    existing_pages_by_file = defaultdict(set)
     if vectorstore:
         for _, doc in vectorstore.docstore._dict.items():
-            file_name = doc.metadata.get("file_name")
+            file_name = doc.metadata.get("file_name") or doc.metadata.get("file") or doc.metadata.get("filename")
+            page_no = doc.metadata.get("page")
             if file_name:
                 existing_files.add(file_name)
+                if isinstance(page_no, int):
+                    existing_pages_by_file[file_name].add(page_no)
 
-    # Filter out docs that are already present (by file_name)
+    # Filter out docs that are already present (by file_name + page)
     new_docs = []
     for doc in docs:
-        file_name = doc.metadata.get("file_name")
-        if file_name and file_name in existing_files:
-            logger.info(f"Skipping {file_name}: already in vector store.")
+        file_name = doc.metadata.get("file_name") or doc.metadata.get("file") or doc.metadata.get("filename")
+        page_no = doc.metadata.get("page")
+        if file_name and isinstance(page_no, int) and page_no in existing_pages_by_file.get(file_name, set()):
+            logger.info(f"Skipping {file_name} page {page_no}: already in vector store.")
             continue
         new_docs.append(doc)
 
@@ -423,3 +445,132 @@ def list_vectorstore_files(vectorstore) -> List[str]:
     file_list = sorted(files)
     logger.info(f"Files in vectorstore: {file_list}")
     return file_list
+
+
+def analyze_vectorstore_chunking(vectorstore) -> Dict[str, Any]:
+    """
+    Analyze chunk size and overlap from an existing vectorstore by examining stored documents.
+    
+    This function samples documents from the vectorstore and analyzes their characteristics
+    to estimate the chunk size and overlap parameters used during creation.
+    
+    Parameters
+    ----------
+    vectorstore
+        FAISS vectorstore instance or retriever object
+        
+    Returns
+    -------
+    Dict[str, Any]
+        Dictionary containing analysis results including estimated chunk size, overlap, and statistics
+    """
+    if vectorstore is None:
+        logger.error("Cannot analyze chunking: vectorstore is None")
+        return {}
+    
+    # Handle both vectorstore objects and retriever objects
+    actual_vectorstore = vectorstore
+    if hasattr(vectorstore, 'vectorstore'):
+        # This is a retriever, get the underlying vectorstore
+        actual_vectorstore = vectorstore.vectorstore
+    
+    try:
+        # Sample documents for analysis
+        sample_docs = []
+        doc_items = list(actual_vectorstore.docstore._dict.items())
+        
+        # Take a sample of documents (up to 1000 for analysis)
+        sample_size = min(1000, len(doc_items))
+        import random
+        random.seed(42)  # For reproducible results
+        sampled_items = random.sample(doc_items, sample_size)
+        
+        for _, doc in sampled_items:
+            if hasattr(doc, 'page_content') and hasattr(doc, 'metadata'):
+                sample_docs.append({
+                    'content': doc.page_content,
+                    'metadata': doc.metadata
+                })
+        
+        if not sample_docs:
+            logger.warning("No documents found in vectorstore for analysis")
+            return {}
+        
+        # Analyze chunk sizes
+        chunk_lengths = [len(doc['content']) for doc in sample_docs]
+        avg_chunk_size = sum(chunk_lengths) / len(chunk_lengths)
+        median_chunk_size = sorted(chunk_lengths)[len(chunk_lengths) // 2]
+        min_chunk_size = min(chunk_lengths)
+        max_chunk_size = max(chunk_lengths)
+        
+        # Analyze overlap by looking at consecutive chunks from the same page
+        overlap_estimates = []
+        pages_by_file = {}
+        
+        # Group documents by file and page
+        for doc in sample_docs:
+            file_name = doc['metadata'].get('file_name') or doc['metadata'].get('file') or doc['metadata'].get('filename')
+            page = doc['metadata'].get('page')
+            if file_name and page:
+                key = (file_name, page)
+                if key not in pages_by_file:
+                    pages_by_file[key] = []
+                pages_by_file[key].append(doc)
+        
+        # Sort chunks within each page by chunk_index if available
+        for key, docs in pages_by_file.items():
+            if len(docs) > 1:
+                # Sort by chunk_index if available, otherwise by content length (rough approximation)
+                docs.sort(key=lambda x: x['metadata'].get('chunk_index', len(x['content'])))
+                
+                # Analyze consecutive chunks for overlap
+                for i in range(len(docs) - 1):
+                    chunk1 = docs[i]['content']
+                    chunk2 = docs[i + 1]['content']
+                    
+                    # Find common text at the end of chunk1 and beginning of chunk2
+                    overlap = 0
+                    for j in range(min(50, len(chunk1), len(chunk2))):  # Check up to 50 characters
+                        if chunk1[-(j+1):] == chunk2[:j+1]:
+                            overlap = j + 1
+                    
+                    if overlap > 0:
+                        overlap_estimates.append(overlap)
+        
+        avg_overlap = sum(overlap_estimates) / len(overlap_estimates) if overlap_estimates else 0
+        median_overlap = sorted(overlap_estimates)[len(overlap_estimates) // 2] if overlap_estimates else 0
+        
+        # Analyze chunk distribution
+        chunk_size_distribution = {
+            '0-500': len([l for l in chunk_lengths if l <= 500]),
+            '500-1000': len([l for l in chunk_lengths if 500 < l <= 1000]),
+            '1000-1500': len([l for l in chunk_lengths if 1000 < l <= 1500]),
+            '1500-2000': len([l for l in chunk_lengths if 1500 < l <= 2000]),
+            '2000+': len([l for l in chunk_lengths if l > 2000])
+        }
+        
+        analysis = {
+            'total_documents_analyzed': len(sample_docs),
+            'estimated_chunk_size': {
+                'average': round(avg_chunk_size, 1),
+                'median': median_chunk_size,
+                'min': min_chunk_size,
+                'max': max_chunk_size,
+                'distribution': chunk_size_distribution
+            },
+            'estimated_overlap': {
+                'average': round(avg_overlap, 1),
+                'median': median_overlap,
+                'samples_analyzed': len(overlap_estimates)
+            },
+            'recommended_settings': {
+                'chunk_size': round(avg_chunk_size),
+                'chunk_overlap': round(avg_overlap)
+            }
+        }
+        
+        return analysis
+        
+    except Exception as e:
+        logger.error(f"Error analyzing vectorstore chunking: {e}")
+        return {}
