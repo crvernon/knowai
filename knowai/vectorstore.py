@@ -220,7 +220,7 @@ def get_retriever_from_directory(
     persist: bool = True,
     metadata_parquet_path: str = "metadata.parquet",
     k: int = 10,
-    chunk_size: int = 1000,
+    chunk_size: int = 1400,
     chunk_overlap: int = 200,
 ) -> Optional[object]:
     """

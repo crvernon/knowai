@@ -15,7 +15,8 @@ from .vectorstore import (
     get_retriever_from_directory,
     load_vectorstore,
     show_vectorstore_schema,
-    list_vectorstore_files
+    list_vectorstore_files,
+    analyze_vectorstore_chunking
 )
 
 
@@ -83,6 +84,22 @@ def inspect_vectorstore(args):
     files = list_vectorstore_files(vectorstore)
     logger.info(f"Files in vectorstore: {files}")
     
+    # Analyze chunking if requested
+    if args.analyze_chunking:
+        logger.info("Analyzing chunking parameters...")
+        analysis = analyze_vectorstore_chunking(vectorstore)
+        if analysis:
+            logger.info("Chunking analysis:")
+            logger.info(f"  Documents analyzed: {analysis['total_documents_analyzed']}")
+            logger.info(f"  Estimated chunk size: {analysis['estimated_chunk_size']['average']} chars (avg), {analysis['estimated_chunk_size']['median']} chars (median)")
+            logger.info(f"  Estimated overlap: {analysis['estimated_overlap']['average']} chars (avg), {analysis['estimated_overlap']['median']} chars (median)")
+            logger.info(f"  Recommended settings: chunk_size={analysis['recommended_settings']['chunk_size']}, chunk_overlap={analysis['recommended_settings']['chunk_overlap']}")
+            logger.info("  Chunk size distribution:")
+            for range_name, count in analysis['estimated_chunk_size']['distribution'].items():
+                logger.info(f"    {range_name}: {count} chunks")
+        else:
+            logger.warning("Could not analyze chunking parameters")
+    
     return 0
 
 
@@ -124,6 +141,8 @@ Examples:
     inspect_parser.add_argument('vectorstore_path', help='Path to the FAISS store')
     inspect_parser.add_argument('--k', type=int, default=10,
                                help='Number of top results to return from retriever')
+    inspect_parser.add_argument('--analyze-chunking', action='store_true',
+                               help='Analyze chunk size and overlap parameters used in the vectorstore')
     inspect_parser.add_argument('--verbose', '-v', action='store_true',
                                help='Enable verbose logging')
     

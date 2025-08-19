@@ -52,7 +52,7 @@ python -m knowai.cli_vectorstore inspect <vectorstore_path>
 Or programmatically:
 
 ```python
-from knowai import load_vectorstore, show_vectorstore_schema, list_vectorstore_files
+from knowai import load_vectorstore, show_vectorstore_schema, list_vectorstore_files, analyze_vectorstore_chunking
 
 # Load vectorstore
 vectorstore = load_vectorstore("my_vectorstore")
@@ -65,6 +65,11 @@ print(f"Metadata fields: {schema['metadata_fields']}")
 # List files in vectorstore
 files = list_vectorstore_files(vectorstore)
 print(f"Files: {files}")
+
+# Analyze chunking parameters used to build the vectorstore
+analysis = analyze_vectorstore_chunking(vectorstore)
+print(f"Estimated chunk size: {analysis['recommended_settings']['chunk_size']}")
+print(f"Estimated overlap: {analysis['recommended_settings']['chunk_overlap']}")
 ```
 
 By default, this will create a vectorstore using FAISS named "test_faiss_store" in the root directory of your repository.  

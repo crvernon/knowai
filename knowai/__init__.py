@@ -5,7 +5,8 @@ from .vectorstore import (
     load_vectorstore,
     show_vectorstore_schema,
     list_vectorstore_files,
-    process_pdfs_to_documents
+    process_pdfs_to_documents,
+    analyze_vectorstore_chunking
 )
 from .utils import get_azure_credentials
 
@@ -17,6 +18,7 @@ __all__ = [
     "show_vectorstore_schema",
     "list_vectorstore_files",
     "process_pdfs_to_documents",
+    "analyze_vectorstore_chunking",
     "get_azure_credentials"
 ]
 

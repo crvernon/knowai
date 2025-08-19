@@ -14,7 +14,7 @@ from langchain_community.vectorstores import FAISS
 from langchain_openai import AzureOpenAIEmbeddings
 
 # Load credentials; make sure dotenv overwrites any system variable settings
-load_dotenv("/Users/d3y010/repos/crvernon/knowai/.env", override=True)
+load_dotenv(".env", override=True)
 
 api_key = os.getenv("AZURE_OPENAI_API_KEY")
 azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
