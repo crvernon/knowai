@@ -114,7 +114,7 @@ def process_pdfs_to_documents(
 
 
 def get_retriever_from_docs(
-    docs: list,
+    docs: List[Document],
     persist_directory: str = "faiss_store",
     persist: bool = True,
     k: int = 10,
@@ -126,7 +126,7 @@ def get_retriever_from_docs(
     
     Parameters
     ----------
-    docs : list
+    docs : List[Document]
         List of Document objects to add to vector store
     persist_directory : str, default "faiss_store"
         Directory to persist the FAISS index
