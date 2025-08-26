@@ -1741,10 +1741,20 @@ async def combine_answers_node(state: GraphState) -> GraphState:
                     streaming_callback=streaming_callback
                 )
                 
+                # Mark that we've already streamed the response
+                if streaming_callback:
+                    state_to_return["_response_already_streamed"] = True
+                    logging.info("[combine_answers_node] Marked response as already streamed (hierarchical consolidation)")
+                
             elif hierarchical_results and len(hierarchical_results) == 1:
                 # Only one hierarchical batch - use it directly
                 logging.info("[combine_answers_node] Using single hierarchical consolidation result")
                 output_generation = hierarchical_results[0]
+                
+                # Note: Hierarchical consolidation does NOT stream the response (streaming_callback=None),
+                # so we do NOT set the flag to indicate it was already streamed.
+                # The final callback will send the response to the user.
+                logging.info("[combine_answers_node] Hierarchical consolidation result not streamed - will send via final callback")
                 
             else:
                 # No hierarchical consolidation - use traditional approach for ≤10 files
@@ -1781,6 +1791,11 @@ async def combine_answers_node(state: GraphState) -> GraphState:
                     error_list=[],    # Already handled in individual processing
                     streaming_callback=streaming_callback
                 )
+                
+                # Mark that we've already streamed the response
+                if streaming_callback:
+                    state_to_return["_response_already_streamed"] = True
+                    logging.info("[combine_answers_node] Marked response as already streamed (individual file responses)")
             
         elif batch_results and len(batch_results) > 1:
             # Multiple batches were processed, combine the results
@@ -1814,10 +1829,21 @@ async def combine_answers_node(state: GraphState) -> GraphState:
                 streaming_callback=streaming_callback
             )
             
+            # Mark that we've already streamed the response
+            if streaming_callback:
+                state_to_return["_response_already_streamed"] = True
+                logging.info("[combine_answers_node] Marked response as already streamed (batch results)")
+            
         elif batch_results and len(batch_results) == 1:
             # Single batch was processed, use the result directly
             logging.info("[combine_answers_node] Using single batch result")
             output_generation = batch_results[0]
+            
+            # Mark that we've already streamed the response (it was streamed during batch processing)
+            streaming_callback = state.get("streaming_callback")
+            if streaming_callback:
+                state_to_return["_response_already_streamed"] = True
+                logging.info("[combine_answers_node] Marked response as already streamed (single batch result)")
             
         else:
             # No batch processing occurred, use traditional single-batch approach
@@ -1867,6 +1893,11 @@ async def combine_answers_node(state: GraphState) -> GraphState:
                     error_list=error_list,
                     streaming_callback=streaming_callback
                 )
+                
+                # Mark that we've already streamed the response
+                if streaming_callback:
+                    state_to_return["_response_already_streamed"] = True
+                    logging.info("[combine_answers_node] Marked response as already streamed (traditional single-batch)")
 
     # Store individual responses separately for UI display
     if state.get("show_detailed_individual_responses", False):
@@ -1893,13 +1924,20 @@ async def combine_answers_node(state: GraphState) -> GraphState:
     
     # If a streaming callback exists but we generated the answer without streaming,
     # send the full answer once so the chat UI receives the response.
+    # However, if we already streamed the response during generation, don't send it again.
     final_cb = state.get("streaming_callback")
+    response_already_streamed = state_to_return.get("_response_already_streamed", False)
+    
     if final_cb:
-        try:
-            final_cb(output_generation)
-        except Exception:
-            # Swallow any UI-side errors so they do not break the agent.
-            pass
+        if response_already_streamed:
+            logging.info("[combine_answers_node] Skipping duplicate streaming callback - response already streamed")
+        else:
+            logging.info("[combine_answers_node] Sending final response via streaming callback")
+            try:
+                final_cb(output_generation)
+            except Exception:
+                # Swallow any UI-side errors so they do not break the agent.
+                pass
     
     state_to_return["generation"] = output_generation
     _log_node_end("combine_answers_node", start_time)
