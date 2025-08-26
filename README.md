@@ -13,13 +13,64 @@
     - `AZURE_OPENAI_API_KEY` - Your API key
     - `AZURE_OPENAI_ENDPOINT` - Your Azure endpoint
     - `AZURE_OPENAI_DEPLOYMENT` - Your LLM deployment name (e.g., "gpt-4o")
-    - `AZURE_EMBEDDINGS_DEPLOYMENT` - Your embeddings model deployment name (e.g., "text-embedding-3-large")
-    - `AZURE_OPENAI_API_VERSION` - Your Azure LLM deployment version (e.g., "2024-02-01")
+    - `AZURE_EMBEDDINGS_DEPLOYMENT` - Your embeddings model deployment name (e.g., "text-embedding-3-large", defaults to "text-embedding-3-large")
+- `AZURE_OPENAI_API_VERSION` - Your Azure LLM deployment version (e.g., "2024-02-01")
+- `AZURE_OPENAI_EMBEDDINGS_API_VERSION` - Your Azure embeddings API version (e.g., "2024-02-01", defaults to "2024-02-01")
 
 ### Building the vectorstore
-From the root directory of this repository, run the following from a the terminal (ensuring that your virtual environment is active) to build the vectorstore:
 
-`python scripts/build_vectorstore.py <directory_containing_your_input_pdf_files> --vectorstore_path <directory_name_for_vectorstore>`
+#### Using the CLI (Recommended)
+From the root directory of this repository, run the following from a terminal (ensuring that your virtual environment is active) to build the vectorstore:
+
+```bash
+python -m knowai.cli_vectorstore build <directory_containing_your_input_pdf_files> --metadata_parquet_path <path_to_metadata.parquet> --vectorstore_path <directory_name_for_vectorstore>
+```
+
+#### Using the Python API
+You can also build vectorstores programmatically:
+
+```python
+from knowai import get_retriever_from_directory
+
+retriever = get_retriever_from_directory(
+    directory_path="path/to/pdfs",
+    persist_directory="my_vectorstore",
+    metadata_parquet_path="metadata.parquet",
+    k=10,
+    chunk_size=1000,
+    chunk_overlap=200
+)
+```
+
+#### Inspecting Vectorstores
+To inspect an existing vectorstore:
+
+```bash
+python -m knowai.cli_vectorstore inspect <vectorstore_path>
+```
+
+Or programmatically:
+
+```python
+from knowai import load_vectorstore, show_vectorstore_schema, list_vectorstore_files, analyze_vectorstore_chunking
+
+# Load vectorstore
+vectorstore = load_vectorstore("my_vectorstore")
+
+# Show schema information
+schema = show_vectorstore_schema(vectorstore)
+print(f"Total vectors: {schema['total_vectors']}")
+print(f"Metadata fields: {schema['metadata_fields']}")
+
+# List files in vectorstore
+files = list_vectorstore_files(vectorstore)
+print(f"Files: {files}")
+
+# Analyze chunking parameters used to build the vectorstore
+analysis = analyze_vectorstore_chunking(vectorstore)
+print(f"Estimated chunk size: {analysis['recommended_settings']['chunk_size']}")
+print(f"Estimated overlap: {analysis['recommended_settings']['chunk_overlap']}")
+```
 
 By default, this will create a vectorstore using FAISS named "test_faiss_store" in the root directory of your repository.  
 
