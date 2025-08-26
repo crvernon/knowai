@@ -1,9 +1,7 @@
-
-
 """
 Unit‑tests for core node functions in *knowai.agent*.
 
-All external services (Azure OpenAI, FAISS, etc.) are stubbed so that the
+All external services (Azure OpenAI, FAISS, etc.) are stubbed so that the
 tests run offline and deterministically.
 """
 from __future__ import annotations
@@ -126,15 +124,13 @@ def base_state(tmp_path: Path) -> Dict[str, Any]:
         "allowed_files": None,
         "question": None,
         "documents_by_file": None,
-        "individual_answers": None,
         "n_alternatives": 2,
         "k_per_query": 5,
         "generation": None,
         "conversation_history": [],
-        "bypass_individual_generation": False,
         "raw_documents_for_synthesis": None,
         "k_chunks_retriever": 3,
-        "combine_threshold": 3,
+        "k_chunks_retriever_all_docs": 10,
     }
 
 
@@ -198,30 +194,4 @@ def test_format_conversation_history() -> None:
     # Empty history returns placeholder
     assert (
         agent_mod._format_conversation_history([]) == "No previous conversation history."
-    )
-
-
-def test_decide_processing_path_after_extraction(base_state: Dict[str, Any]) -> None:
-    """Verify the routing logic for all branches."""
-    import knowai.agent as agent_mod
-
-    # 1. Missing question ⇒ generate_individual_answers
-    state = {**base_state, "allowed_files": ["a.txt"]}
-    assert (
-        agent_mod.decide_processing_path_after_extraction(state)
-        == "to_generate_individual_answers"
-    )
-
-    # 2. bypass flag set ⇒ format_raw_for_synthesis
-    state = {**base_state, "question": "Q", "allowed_files": ["a"], "bypass_individual_generation": True}
-    assert (
-        agent_mod.decide_processing_path_after_extraction(state)
-        == "to_format_raw_for_synthesis"
-    )
-
-    # 3. Standard path
-    state = {**base_state, "question": "Q", "allowed_files": ["a"]}
-    assert (
-        agent_mod.decide_processing_path_after_extraction(state)
-        == "to_generate_individual_answers"
     )

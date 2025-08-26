@@ -81,12 +81,6 @@ with st.sidebar:
         default=st.session_state.simple_selected_files,
         key="simple_file_selector"
     )
-    st.session_state.simple_bypass_gen = st.checkbox(
-        "Bypass individual answer generation", 
-        value=st.session_state.get("simple_bypass_gen", False),
-        key="simple_bypass_checkbox",
-        help="Synthesize directly from all retrieved document chunks."
-    )
     if st.button("Clear Chat", key="simple_clear_chat"):
         st.session_state.simple_messages = []
         if hasattr(st.session_state.simple_agent, 'session_state') and st.session_state.simple_agent.session_state is not None:
@@ -116,8 +110,7 @@ async def handle_simple_query(question: str):
             # Call the agent's process_turn method
             agent_response_data = await st.session_state.simple_agent.process_turn(
                 user_question=question,
-                selected_files=st.session_state.simple_selected_files,
-                bypass_individual_gen=st.session_state.simple_bypass_gen
+                selected_files=st.session_state.simple_selected_files
             )
             final_answer = agent_response_data.get("generation", "Sorry, I could not generate a response.")
             

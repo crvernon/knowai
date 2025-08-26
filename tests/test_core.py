@@ -1,5 +1,3 @@
-
-
 """
 Unit‑tests for the :pyclass:`knowai.core.KnowAIAgent`.
 
@@ -39,10 +37,9 @@ class _DummyGraphApp:
         await anyio.sleep(0)  # Yield control to satisfy the event‑loop
         return {
             "generation": f"Echo: {state.get('question')}",
-            "individual_answers": {"file1": "dummy answer"},
             "documents_by_file": {"file1": []},
             "raw_documents_for_synthesis": "dummy raw text",
-            "bypass_individual_generation": state.get("bypass_individual_generation", False),
+            "detailed_responses_for_ui": None,
         }
 
     def get_graph(self) -> _DummyGraph:  # noqa: D401
@@ -97,15 +94,12 @@ def test_initial_session_state(agent: "knowai.core.KnowAIAgent") -> None:  # typ
         "allowed_files",
         "question",
         "documents_by_file",
-        "individual_answers",
         "n_alternatives",
         "k_per_query",
         "generation",
         "conversation_history",
-        "bypass_individual_generation",
         "raw_documents_for_synthesis",
         "k_chunks_retriever",
-        "combine_threshold",
     }
 
     assert required_keys.issubset(agent.session_state.keys())
@@ -119,22 +113,19 @@ async def test_process_turn_updates_state(agent: "knowai.core.KnowAIAgent") -> N
     result = await agent.process_turn(
         user_question="What is RAG?",
         selected_files=["file1"],
-        bypass_individual_gen=False,
     )
 
     # Top‑level return keys
     expected_keys = {
         "generation",
-        "individual_answers",
         "documents_by_file",
         "raw_documents_for_synthesis",
-        "bypass_individual_generation",
+        "detailed_responses",
     }
     assert expected_keys == set(result.keys())
 
     # Values come from the dummy graph
     assert result["generation"] == "Echo: What is RAG?"
-    assert result["individual_answers"] == {"file1": "dummy answer"}
 
     # Conversation history should contain exactly one turn
     history: List[Dict[str, str]] = agent.session_state["conversation_history"]  # type: ignore[assignment]
