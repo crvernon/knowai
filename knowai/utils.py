@@ -2,6 +2,7 @@ import logging
 import os
 import tiktoken
 from typing import Optional, Dict
+from functools import lru_cache
 
 
 def get_azure_credentials() -> Optional[Dict[str, str]]:
@@ -30,9 +31,12 @@ def get_azure_credentials() -> Optional[Dict[str, str]]:
     }
 
 
+@lru_cache(maxsize=1)
 def get_tokenizer(encoding: str = "cl100k_base"):
     """
     Get the tiktoken tokenizer for accurate token counting.
+    
+    Cached to avoid re-instantiation on every call for better performance.
     
     Returns
     -------
