@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 GPT4_1_CONTEXT_WINDOW = 1_000_000  # GPT-4.1 context window
 TOKEN_SAFETY_MARGIN = 0.1  # 10% safety margin
 MAX_COMPLETION_TOKENS = 32768  # Maximum tokens for completion
-MAX_CONCURRENT_LLM_CALLS = 10  # Limit concurrent LLM calls to 10
+MAX_CONCURRENT_LLM_CALLS = 50  # Limit concurrent LLM calls (increased from 10 for better throughput)
 MAX_FILES_FOR_HIERARCHICAL_CONSOLIDATION = 10  # Maximum number of files before using hierarchical consolidation
 HIERARCHICAL_CONSOLIDATION_BATCH_SIZE = 10  # Batch size for hierarchical consolidation
 MAX_TOKENS_PER_HIERARCHICAL_BATCH = 25_000  # Maximum tokens per hierarchical consolidation batch
@@ -327,6 +327,8 @@ class GraphState(TypedDict):
         Maximum tokens allowed per synthesis batch.
     batch_results : Optional[List[str]]
         Results from processing multiple batches.
+    max_concurrent_llm_calls : int
+        Maximum number of concurrent LLM calls allowed.
     process_files_individually : bool
         Whether to process each file individually and then consolidate responses.
     individual_file_responses : Optional[Dict[str, str]]
@@ -362,6 +364,7 @@ class GraphState(TypedDict):
     streaming_callback: Optional[Callable[[str], None]]
     max_tokens_per_batch: int
     batch_results: Optional[List[str]]
+    max_concurrent_llm_calls: int
     process_files_individually: bool
     individual_file_responses: Optional[Dict[str, str]]
     hierarchical_consolidation_results: Optional[List[str]]
@@ -890,6 +893,7 @@ async def generate_multi_queries_node(state: GraphState) -> GraphState:
     base_retriever = state.get("retriever")
     n_alternatives = state.get("n_alternatives", 4)
     embeddings_model = state.get("embeddings")
+    allowed_files = state.get("allowed_files", [])
 
     # Initialize with original question
     query_list: List[str] = [question] if question else []
@@ -900,6 +904,22 @@ async def generate_multi_queries_node(state: GraphState) -> GraphState:
             "[generate_multi_queries_node] No question provided. "
             "Skipping query generation."
         )
+        return {**state, "generated_queries": query_list, "query_embeddings": query_embeddings_list}
+
+    # Skip multi-query generation for large file sets (performance optimization)
+    if len(allowed_files) > 20 or n_alternatives == 0:
+        logging.info(
+            f"[generate_multi_queries_node] Skipping multi-query generation for {len(allowed_files)} files "
+            f"(n_alternatives={n_alternatives}). Using original question only."
+        )
+        # Still need to embed the original question
+        try:
+            query_embeddings_list = await embeddings_model.aembed_documents(query_list)
+        except Exception as e_embed:
+            logging.exception(f"[generate_multi_queries_node] Failed to embed query: {e_embed}")
+            query_embeddings_list = []
+        
+        _log_node_end("generate_multi_queries_node", start_time)
         return {**state, "generated_queries": query_list, "query_embeddings": query_embeddings_list}
 
     if not all([llm_small, base_retriever, embeddings_model]):
@@ -1025,6 +1045,25 @@ async def extract_documents_parallel_node(state: GraphState) -> GraphState:
     query_list = state.get("generated_queries")
     query_embeddings_list = state.get("query_embeddings")
     current_documents_by_file: Dict[str, List[Document]] = {}
+    
+    # Adaptive chunk retrieval: fewer chunks per file when processing many files
+    num_files = len(allowed_files) if allowed_files else 0
+    if num_files > 0:
+        if num_files <= 10:
+            adaptive_k = k_per_query
+        elif num_files <= 50:
+            adaptive_k = max(k_per_query - 7, 5)  # Reduce by ~50%
+        elif num_files <= 150:
+            adaptive_k = max(k_per_query - 10, 3)  # Reduce by ~70%
+        else:
+            adaptive_k = max(k_per_query - 12, 3)  # Reduce by ~80%
+        
+        if adaptive_k != k_per_query:
+            logging.info(
+                f"[extract_documents_node] Adaptive chunk retrieval: {num_files} files, "
+                f"adjusting k from {k_per_query} to {adaptive_k} chunks per file"
+            )
+            k_per_query = adaptive_k
 
     if not question:
         logging.info("[extract_documents_node] No question. Skipping extraction.")
@@ -1175,6 +1214,16 @@ async def process_batches_node(state: GraphState) -> GraphState:
     if not question or not combined_docs_list:
         # No processing needed
         return state
+    
+    # Auto-disable individual processing for large file sets (performance optimization)
+    num_files = len(allowed_files) if allowed_files else 0
+    if num_files > 30 and process_files_individually:
+        logging.info(
+            f"[process_batches_node] Auto-disabling individual processing for {num_files} files "
+            f"(threshold: 30). Using batch processing instead."
+        )
+        state["process_files_individually"] = False
+        process_files_individually = False
     
     if process_files_individually:
         # Route to individual file processing - skip batch processing
@@ -1950,7 +1999,7 @@ async def process_individual_files_node(state: GraphState) -> GraphState:
     
     This node takes the documents retrieved for each file and generates an
     individual LLM response for each file asynchronously in parallel, with
-    a maximum of 10 concurrent LLM calls to prevent overwhelming the service.
+    a configurable maximum of concurrent LLM calls to prevent overwhelming the service.
     The responses are stored in `individual_file_responses` for later consolidation.
     
     Parameters
@@ -1971,6 +2020,7 @@ async def process_individual_files_node(state: GraphState) -> GraphState:
     documents_by_file = state.get("documents_by_file", {})
     conversation_history = state.get("conversation_history")
     detailed_flag = state.get("detailed_response_desired", True)
+    max_concurrent = state.get("max_concurrent_llm_calls", MAX_CONCURRENT_LLM_CALLS)
     # llm_instance = state.get("llm_small") or state.get("llm_large")
     llm_instance = state.get("llm_large")
     
@@ -1985,11 +2035,11 @@ async def process_individual_files_node(state: GraphState) -> GraphState:
     conversation_history_str = _format_conversation_history(conversation_history)
     combo_prompt = get_synthesis_prompt_template()
     
-    # Limit concurrent LLM calls to 10
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT_LLM_CALLS)
+    # Use configurable concurrent LLM call limit
+    semaphore = asyncio.Semaphore(max_concurrent)
     
     total_files = len(allowed_files)
-    logging.info(f"[process_individual_files_node] Processing {total_files} files asynchronously (max {MAX_CONCURRENT_LLM_CALLS} concurrent)")
+    logging.info(f"[process_individual_files_node] Processing {total_files} files asynchronously (max {max_concurrent} concurrent)")
     
     # Progress tracking
     completed_files = 0
