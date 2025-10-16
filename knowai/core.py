@@ -18,7 +18,7 @@ from .errors import (
 from knowai.agent import GLOBAL_PROGRESS_CB
 
 K_CHUNKS_RETRIEVER_DEFAULT = 15
-K_CHUNKS_RETRIEVER_ALL_DOCS_DEFAULT = 100000
+K_CHUNKS_RETRIEVER_ALL_DOCS_DEFAULT = 1000  # Reduced from 100000 for better performance
 MAX_CONVERSATION_TURNS_DEFAULT = 25
 N_QUERY_ALTERNATIVES_DEFAULT = 1
 
@@ -102,6 +102,13 @@ class KnowAIAgent:
         When True, each file is processed separately by the LLM and then all
         responses are combined into a final answer. When False, uses traditional
         batch processing approach.
+        Note: Individual processing is automatically disabled for >30 files for performance.
+    
+    performance_mode : str, default ``"balanced"``
+        Performance optimization preset. Options:
+        - "quality": Prioritize answer quality (slower, more chunks per file)
+        - "balanced": Balance quality and speed (recommended for 50-150 docs)
+        - "speed": Prioritize speed (fewer chunks, skip multi-query)
 
     Attributes
     ----------
@@ -121,8 +128,9 @@ class KnowAIAgent:
         env_file_path: Optional[str] = None,
         initial_state_overrides: Optional[Dict[str, Any]] = None,
         log_graph: bool = False,
-
-        process_files_individually: bool = True
+        process_files_individually: bool = False,
+        performance_mode: str = "quality",
+        max_concurrent_llm_calls: Optional[int] = None
     ) -> None:
         if env_file_path and os.path.exists(env_file_path):
             load_dotenv(dotenv_path=env_file_path)
@@ -134,6 +142,47 @@ class KnowAIAgent:
                 "No .env file explicitly provided or auto-detected. "
                 "Ensure environment variables are set."
             )
+
+        # Apply performance mode presets
+        if performance_mode == "quality":
+            preset_k_retriever = 15
+            preset_k_all_docs = 2000
+            preset_n_alternatives = 0
+            preset_process_individually = process_files_individually
+            preset_max_concurrent = max_concurrent_llm_calls or 20
+        elif performance_mode == "balanced":
+            preset_k_retriever = 8
+            preset_k_all_docs = 1000
+            preset_n_alternatives = 0
+            preset_process_individually = False
+            preset_max_concurrent = max_concurrent_llm_calls or 50
+        elif performance_mode == "speed":
+            preset_k_retriever = 5
+            preset_k_all_docs = 500
+            preset_n_alternatives = 0
+            preset_process_individually = False
+            preset_max_concurrent = max_concurrent_llm_calls or 100
+        else:
+            # Default to balanced if invalid mode
+            logging.warning(f"Invalid performance_mode '{performance_mode}', using 'balanced'")
+            preset_k_retriever = 8
+            preset_k_all_docs = 1000
+            preset_n_alternatives = 0
+            preset_process_individually = False
+            preset_max_concurrent = max_concurrent_llm_calls or 50
+        
+        # Override with explicit parameters if provided
+        final_k_retriever = k_chunks_retriever if k_chunks_retriever != K_CHUNKS_RETRIEVER_DEFAULT else preset_k_retriever
+        final_k_all_docs = k_chunks_retriever_all_docs if k_chunks_retriever_all_docs != K_CHUNKS_RETRIEVER_ALL_DOCS_DEFAULT else preset_k_all_docs
+        final_process_individually = preset_process_individually
+        final_max_concurrent = preset_max_concurrent
+        
+        logging.info(f"Performance mode: {performance_mode}")
+        logging.info(f"  k_chunks_retriever: {final_k_retriever}")
+        logging.info(f"  k_chunks_retriever_all_docs: {final_k_all_docs}")
+        logging.info(f"  n_alternatives: {preset_n_alternatives}")
+        logging.info(f"  process_files_individually: {final_process_individually}")
+        logging.info(f"  max_concurrent_llm_calls: {final_max_concurrent}")
 
         self.graph_app = create_graph_app()
         self.max_conversation_turns = max_conversation_turns
@@ -148,23 +197,23 @@ class KnowAIAgent:
             "allowed_files": None,
             "question": None,
             "documents_by_file": None,
-            "n_alternatives": N_QUERY_ALTERNATIVES_DEFAULT,
+            "n_alternatives": preset_n_alternatives,
             "k_per_query": 10,
             "generation": None,
             "conversation_history": [],
             "raw_documents_for_synthesis": None,
             "combined_documents": None,
             "detailed_response_desired": True,
-            "k_chunks_retriever": k_chunks_retriever,
-            "k_chunks_retriever_all_docs": k_chunks_retriever_all_docs,
+            "k_chunks_retriever": final_k_retriever,
+            "k_chunks_retriever_all_docs": final_k_all_docs,
             "generated_queries": None,
             "query_embeddings": None,
             "streaming_callback": None,
             "__progress_cb__": None,
-            "max_tokens_per_batch": int(1_000_000 * 0.9),  # GPT-4.1 with 10% safety margin
+            "max_tokens_per_batch": int(1_000_000 * 0.85),  # GPT-4.1 with 15% safety margin for better batching
             "batch_results": None,
-
-            "process_files_individually": process_files_individually,
+            "max_concurrent_llm_calls": final_max_concurrent,
+            "process_files_individually": final_process_individually,
             "individual_file_responses": None,
             "hierarchical_consolidation_results": None,
             "show_detailed_individual_responses": False,
