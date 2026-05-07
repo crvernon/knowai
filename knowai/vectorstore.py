@@ -28,20 +28,23 @@ from .utils import get_azure_credentials
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_VECTORSTORE_EMBEDDING_BATCH_SIZE = 50
+
 
 def _get_vectorstore_batch_size(total_docs: int) -> int:
     raw_value = os.environ.get("VECTORSTORE_EMBEDDING_BATCH_SIZE")
     if raw_value is None:
-        return max(1, total_docs)
+        return max(1, min(DEFAULT_VECTORSTORE_EMBEDDING_BATCH_SIZE, total_docs))
 
     try:
         return max(1, int(raw_value))
     except ValueError:
         logger.warning(
-            "Invalid VECTORSTORE_EMBEDDING_BATCH_SIZE=%s; embedding all documents in one batch",
+            "Invalid VECTORSTORE_EMBEDDING_BATCH_SIZE=%s; using default batch size %s",
             raw_value,
+            DEFAULT_VECTORSTORE_EMBEDDING_BATCH_SIZE,
         )
-        return max(1, total_docs)
+        return max(1, min(DEFAULT_VECTORSTORE_EMBEDDING_BATCH_SIZE, total_docs))
 
 
 def _document_batches(docs: List[Document], batch_size: int):
