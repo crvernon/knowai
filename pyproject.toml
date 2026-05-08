@@ -4,10 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "knowai"
-version = "0.5.0"
+version = "0.6.0"
 license = {file = "LICENSE"}
 authors = [
   { name="Chris R. Vernon", email="chris.vernon@pnnl.gov" },
+  { name="Tycko P. Franklin", email="tycko.franklin@pnnl.gov" },
 ]
 description = "A conversational RAG agent pipeline using LangGraph"
 readme = "README.md"

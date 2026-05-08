@@ -6,7 +6,7 @@
 #### An agentic AI pipeline for multiple, large PDF reports interrogation
 
 ### Set up
-- Clone this repostiory into a local directory of your choosing
+- Clone this repository into a local directory of your choosing
 - Build a virtual environment 
 - Install `knowai` by running:  `pip install .` from the root directory of your clone (OR) install using `pip install knowai` from PyPI.
 - Configure a `.env` file with the following:
@@ -14,8 +14,9 @@
     - `AZURE_OPENAI_ENDPOINT` - Your Azure endpoint
     - `AZURE_OPENAI_DEPLOYMENT` - Your LLM deployment name (e.g., "gpt-4o")
     - `AZURE_EMBEDDINGS_DEPLOYMENT` - Your embeddings model deployment name (e.g., "text-embedding-3-large", defaults to "text-embedding-3-large")
-- `AZURE_OPENAI_API_VERSION` - Your Azure LLM deployment version (e.g., "2024-02-01")
-- `AZURE_OPENAI_EMBEDDINGS_API_VERSION` - Your Azure embeddings API version (e.g., "2024-02-01", defaults to "2024-02-01")
+    - `AZURE_OPENAI_API_VERSION` - Your Azure LLM deployment version (e.g., "2024-02-01")
+    - `AZURE_OPENAI_EMBEDDINGS_API_VERSION` - Your Azure embeddings API version (e.g., "2024-02-01", defaults to "2024-02-01")
+    - `VECTORSTORE_EMBEDDING_BATCH_SIZE` - Optional number of chunks to embed per vectorstore write batch. Defaults to `50`.
 
 ### Building the vectorstore
 
@@ -37,10 +38,22 @@ retriever = get_retriever_from_directory(
     persist_directory="my_vectorstore",
     metadata_parquet_path="metadata.parquet",
     k=10,
-    chunk_size=1000,
+    chunk_size=1400,
     chunk_overlap=200
 )
 ```
+
+#### PDF ingestion and embedding batches
+When building a vectorstore, KnowAI processes each PDF page by page. Text is extracted with PyMuPDF, using standard text extraction first and a block-based fallback when a page has no standard text. Page text is split into overlapping chunks, very short chunks are skipped, and each retained chunk is stored as a LangChain `Document` with the chunk text plus metadata from the parquet file.
+
+Each chunk also gets provenance fields that make retrieval traceable:
+
+- `file_name`
+- `source_path`
+- `page`
+- `chunk_index`
+
+Embedding writes are batched by default to avoid sending oversized inputs to the embeddings model. New chunks are embedded and added to FAISS in batches of up to `50` documents unless `VECTORSTORE_EMBEDDING_BATCH_SIZE` is set. When updating an existing vectorstore, KnowAI checks existing `file_name` and `page` metadata and skips pages already present in the FAISS store.
 
 #### Inspecting Vectorstores
 To inspect an existing vectorstore:
@@ -360,10 +373,13 @@ python -m pytest
 # Test specific functionality
 python -m pytest tests/test_prompts.py -v
 python -m pytest tests/test_agent.py -v
+python -m pytest tests/test_vectorstore.py -v
 
 # Test no-chunks feedback improvements
 python scripts/test_no_chunks_feedback.py
 ```
+
+The vectorstore tests cover default embedding batching, `VECTORSTORE_EMBEDDING_BATCH_SIZE` overrides, incremental updates to existing FAISS stores, and metadata-aware vectorstore inspection utilities.
 
 ## Contributing
 

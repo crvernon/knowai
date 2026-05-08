@@ -28,6 +28,29 @@ from .utils import get_azure_credentials
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_VECTORSTORE_EMBEDDING_BATCH_SIZE = 50
+
+
+def _get_vectorstore_batch_size(total_docs: int) -> int:
+    raw_value = os.environ.get("VECTORSTORE_EMBEDDING_BATCH_SIZE")
+    if raw_value is None:
+        return max(1, min(DEFAULT_VECTORSTORE_EMBEDDING_BATCH_SIZE, total_docs))
+
+    try:
+        return max(1, int(raw_value))
+    except ValueError:
+        logger.warning(
+            "Invalid VECTORSTORE_EMBEDDING_BATCH_SIZE=%s; using default batch size %s",
+            raw_value,
+            DEFAULT_VECTORSTORE_EMBEDDING_BATCH_SIZE,
+        )
+        return max(1, min(DEFAULT_VECTORSTORE_EMBEDDING_BATCH_SIZE, total_docs))
+
+
+def _document_batches(docs: List[Document], batch_size: int):
+    for start in range(0, len(docs), batch_size):
+        yield docs[start:start + batch_size]
+
 
 def process_pdfs_to_documents(
     directory_path: str,
@@ -199,11 +222,16 @@ def get_retriever_from_docs(
         return None
 
     # Build or update vectorstore
+    batch_size = _get_vectorstore_batch_size(len(new_docs))
     if vectorstore:
-        vectorstore.add_documents(new_docs)
+        if new_docs:
+            for batch in _document_batches(new_docs, batch_size):
+                vectorstore.add_documents(batch)
         logger.info(f"Added {len(new_docs)} new chunks to FAISS store")
     else:
-        vectorstore = FAISS.from_documents(documents=new_docs, embedding=embeddings)
+        vectorstore = FAISS.from_documents(documents=new_docs[:batch_size], embedding=embeddings)
+        for batch in _document_batches(new_docs[batch_size:], batch_size):
+            vectorstore.add_documents(batch)
         logger.info(f"Created new FAISS store with {len(new_docs)} chunks")
 
     # Persist if required

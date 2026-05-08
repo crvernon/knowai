@@ -7,12 +7,16 @@ import tempfile
 import os
 from unittest.mock import patch, MagicMock
 import pandas as pd
+from langchain_core.documents import Document
 
+import knowai.vectorstore as vectorstore_module
 from knowai.vectorstore import (
     get_azure_credentials,
+    get_retriever_from_docs,
     show_vectorstore_schema,
     list_vectorstore_files,
-    analyze_vectorstore_chunking
+    analyze_vectorstore_chunking,
+    DEFAULT_VECTORSTORE_EMBEDDING_BATCH_SIZE
 )
 
 
@@ -39,6 +43,145 @@ class TestVectorstoreUtils:
         with patch.dict(os.environ, {}, clear=True):
             credentials = get_azure_credentials()
             assert credentials is None
+
+    def test_get_retriever_batches_embeddings_by_default(self, monkeypatch):
+        """Large document sets should be embedded in bounded batches by default."""
+        calls = []
+
+        class FakeVectorstore:
+            def __init__(self, docs):
+                self.docstore = MagicMock()
+                self.docstore._dict = {}
+                self.docs = list(docs)
+
+            def add_documents(self, docs):
+                calls.append(("add", len(docs)))
+                self.docs.extend(docs)
+
+            def save_local(self, persist_directory):
+                calls.append(("save", persist_directory))
+
+            def as_retriever(self, search_kwargs):
+                self.search_kwargs = search_kwargs
+                return self
+
+        def fake_from_documents(documents, embedding):
+            calls.append(("from", len(documents)))
+            return FakeVectorstore(documents)
+
+        monkeypatch.delenv("VECTORSTORE_EMBEDDING_BATCH_SIZE", raising=False)
+        monkeypatch.setattr(vectorstore_module.os.path, "exists", lambda _: False)
+        monkeypatch.setattr(vectorstore_module, "get_azure_credentials", lambda: {"ok": True})
+        monkeypatch.setattr(vectorstore_module.FAISS, "from_documents", staticmethod(fake_from_documents))
+
+        docs = [
+            Document(page_content=f"chunk {i}", metadata={"file_name": "large.pdf", "page": i})
+            for i in range(DEFAULT_VECTORSTORE_EMBEDDING_BATCH_SIZE * 2 + 5)
+        ]
+
+        retriever = get_retriever_from_docs(
+            docs=docs,
+            persist_directory="unused",
+            persist=True,
+            embeddings=object(),
+        )
+
+        assert retriever is not None
+        assert calls == [
+            ("from", DEFAULT_VECTORSTORE_EMBEDDING_BATCH_SIZE),
+            ("add", DEFAULT_VECTORSTORE_EMBEDDING_BATCH_SIZE),
+            ("add", 5),
+            ("save", "unused"),
+        ]
+
+    def test_get_retriever_uses_configured_embedding_batch_size(self, monkeypatch):
+        """VECTORSTORE_EMBEDDING_BATCH_SIZE should override the default batch size."""
+        calls = []
+
+        class FakeVectorstore:
+            def __init__(self, docs):
+                self.docstore = MagicMock()
+                self.docstore._dict = {}
+                self.docs = list(docs)
+
+            def add_documents(self, docs):
+                calls.append(("add", len(docs)))
+                self.docs.extend(docs)
+
+            def as_retriever(self, search_kwargs):
+                return self
+
+        def fake_from_documents(documents, embedding):
+            calls.append(("from", len(documents)))
+            return FakeVectorstore(documents)
+
+        monkeypatch.setenv("VECTORSTORE_EMBEDDING_BATCH_SIZE", "2")
+        monkeypatch.setattr(vectorstore_module.os.path, "exists", lambda _: False)
+        monkeypatch.setattr(vectorstore_module, "get_azure_credentials", lambda: {"ok": True})
+        monkeypatch.setattr(vectorstore_module.FAISS, "from_documents", staticmethod(fake_from_documents))
+
+        docs = [
+            Document(page_content=f"chunk {i}", metadata={"file_name": "large.pdf", "page": i})
+            for i in range(5)
+        ]
+
+        retriever = get_retriever_from_docs(
+            docs=docs,
+            persist_directory="unused",
+            persist=False,
+            embeddings=object(),
+        )
+
+        assert retriever is not None
+        assert calls == [("from", 2), ("add", 2), ("add", 1)]
+
+    def test_get_retriever_batches_additions_to_existing_vectorstore(self, monkeypatch):
+        """Incremental updates should also use bounded embedding batches."""
+        calls = []
+
+        class FakeVectorstore:
+            def __init__(self):
+                self.docstore = MagicMock()
+                self.docstore._dict = {}
+
+            def add_documents(self, docs):
+                calls.append(("add", len(docs)))
+
+            def save_local(self, persist_directory):
+                calls.append(("save", persist_directory))
+
+            def as_retriever(self, search_kwargs):
+                return self
+
+        fake_vectorstore = FakeVectorstore()
+
+        monkeypatch.delenv("VECTORSTORE_EMBEDDING_BATCH_SIZE", raising=False)
+        monkeypatch.setattr(vectorstore_module.os.path, "exists", lambda _: True)
+        monkeypatch.setattr(vectorstore_module, "get_azure_credentials", lambda: {"ok": True})
+        monkeypatch.setattr(
+            vectorstore_module.FAISS,
+            "load_local",
+            staticmethod(lambda *args, **kwargs: fake_vectorstore),
+        )
+
+        docs = [
+            Document(page_content=f"chunk {i}", metadata={"file_name": "large.pdf", "page": i})
+            for i in range(DEFAULT_VECTORSTORE_EMBEDDING_BATCH_SIZE + 5)
+        ]
+
+        retriever = get_retriever_from_docs(
+            docs=docs,
+            persist_directory="existing",
+            persist=True,
+            embeddings=object(),
+        )
+
+        assert retriever is fake_vectorstore
+        assert calls == [
+            ("add", DEFAULT_VECTORSTORE_EMBEDDING_BATCH_SIZE),
+            ("add", 5),
+            ("save", "existing"),
+        ]
     
     def test_show_vectorstore_schema_none(self):
         """Test schema display with None vectorstore."""
